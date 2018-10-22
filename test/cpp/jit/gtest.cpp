@@ -24,6 +24,7 @@ JIT_TEST(FromQualString)
 JIT_TEST(InternedStrings)
 JIT_TEST(IValue)
 JIT_TEST(TopologicalIndex)
+JIT_TEST(TopologicalMove)
 
 #define JIT_TEST_CUDA(name)    \
   TEST(JitTest, name##_CUDA) { \
