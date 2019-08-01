@@ -320,8 +320,13 @@ struct TORCH_API Function : std::enable_shared_from_this<Function> {
 
   static uint64_t peek_at_next_sequence_nr();
 
+  bool is_leaf_accumulator() { return leaf_accumulator; }
+
  protected:
   static uint64_t& get_next_sequence_nr();
+
+  // For loss scaling purposes, note whether this Function is a leaf accumulator or not.
+  bool leaf_accumulator = false;
 
   /// Performs the `Function`'s actual operation.
   virtual variable_list apply(variable_list&& inputs) = 0;
