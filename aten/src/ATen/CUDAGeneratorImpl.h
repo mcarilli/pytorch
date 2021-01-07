@@ -86,6 +86,11 @@ namespace at {
 
 
 // Stores state values. Passed as a kernel argument. See "Usage:" above.
+//
+// WARNING:
+// torch/csrc/jit/codegen/cuda/runtime/rng_utils.cu contains a copy paste of this definition.
+// (they didn't want to codegen based on something in ATen).
+// If you change the definition here, you must change the definition there to match.
 struct PhiloxCudaState {
   PhiloxCudaState() = default;
   PhiloxCudaState(const PhiloxCudaState&) = default;

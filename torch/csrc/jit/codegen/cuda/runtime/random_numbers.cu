@@ -1,4 +1,3 @@
-
 class Philox {
  public:
   __device__ Philox(
@@ -110,3 +109,63 @@ __device__ double uniform(unsigned int x, unsigned int y) {
       (unsigned long long)x ^ ((unsigned long long)y << (53 - 32));
   return z * kRan2Pow53Inv + (kRan2Pow53Inv / 2.0);
 }
+
+
+namespace at {
+
+// WARNING:
+// Copy pasted from ATen/CUDAGeneratorImpl.h,
+// because we don't want to codegen directly from something in ATen.
+// If you change the definition there, you must change the definition here to match.
+struct PhiloxCudaState {
+  PhiloxCudaState() = default;
+  PhiloxCudaState(const PhiloxCudaState&) = default;
+  // Called if graph capture is not underway
+  PhiloxCudaState(uint64_t seed,
+                  uint64_t offset) {
+    seed_ = seed;
+    offset_.val = offset;
+  }
+  // Called if graph capture is underway
+  PhiloxCudaState(uint64_t seed,
+                  int64_t* offset_extragraph,
+                  uint32_t offset_intragraph) {
+    seed_ = seed;
+    offset_.ptr = offset_extragraph;
+    offset_intragraph_ = offset_intragraph;
+    captured_ = true;
+  }
+
+  // Public members, directly accessible by at::cuda::philox::unpack.
+  // If we made them private with getters/setters, the getters/setters
+  // would have to be __device__, and we can't declare __device__ in ATen.
+  union Payload {
+    uint64_t val;
+    int64_t* ptr;
+  };
+
+  uint64_t seed_;
+  Payload offset_;
+  uint32_t offset_intragraph_;
+  bool captured_ = false;
+};
+
+namespace cuda {
+namespace philox {
+
+// WARNING:
+// Copy pasted from ATen/cuda/CudaGraphsUtils.cuh,
+// because we don't want to codegen directly from something in ATen.
+// If you change the definition there, you must change the definition here to match.
+__device__ __forceinline__ std::tuple<uint64_t, uint64_t>
+unpack(at::PhiloxCudaState arg) {
+  if (arg.captured_) {
+    return std::make_tuple(arg.seed_, *(arg.offset_.ptr) + arg.offset_intragraph_);
+  } else {
+    return std::make_tuple(arg.seed_, arg.offset_.val);
+  }
+}
+
+} // namespace philox
+} // namespace cuda
+} // namespace at

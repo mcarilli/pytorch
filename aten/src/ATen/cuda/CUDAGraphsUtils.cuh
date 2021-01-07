@@ -14,6 +14,11 @@ namespace philox {
 // Also, whatever call unpacks PhiloxCudaState in consumer kernels must be inlineable.
 // Easiest thing that comes to mind is, define a free function here, in ATen/cuda.
 // Any cuda consumer can include this header.
+//
+// WARNING:
+// torch/csrc/jit/codegen/cuda/runtime/rng_utils.cu contains a copy paste of this definition.
+// (they didn't want to codegen based on something in ATen).
+// If you change the definition here, you must change the definition there to match.
 __device__ __forceinline__ std::tuple<uint64_t, uint64_t>
 unpack(at::PhiloxCudaState arg) {
   if (arg.captured_) {
