@@ -15,6 +15,11 @@ namespace at {
  *
  * Strategy:
  * ~~~~~~~~~
+ * (It helps to look at
+ * cuda/detail/PhiloxCudaStateRaw.cu and
+ * cuda/detail/UnpackRaw.cu
+ * while you read this.)
+ *
  * A CUDA graph containing multiple RNG ops behaves like a
  * single giant kernel from the perspective of ops external
  * to the graph.  During graph capture, logic below records
@@ -84,45 +89,8 @@ namespace at {
  *
  */
 
-
-// Stores state values. Passed as a kernel argument. See "Usage:" above.
-//
-// WARNING:
-// torch/csrc/jit/codegen/cuda/runtime/rng_utils.cu contains a copy paste of this definition.
-// (they didn't want to codegen based on something in ATen).
-// If you change the definition here, you must change the definition there to match.
-struct PhiloxCudaState {
-  PhiloxCudaState() = default;
-  PhiloxCudaState(const PhiloxCudaState&) = default;
-  // Called if graph capture is not underway
-  PhiloxCudaState(uint64_t seed,
-                  uint64_t offset) {
-    seed_ = seed;
-    offset_.val = offset;
-  }
-  // Called if graph capture is underway
-  PhiloxCudaState(uint64_t seed,
-                  int64_t* offset_extragraph,
-                  uint32_t offset_intragraph) {
-    seed_ = seed;
-    offset_.ptr = offset_extragraph;
-    offset_intragraph_ = offset_intragraph;
-    captured_ = true;
-  }
-
-  // Public members, directly accessible by at::cuda::philox::unpack.
-  // If we made them private with getters/setters, the getters/setters
-  // would have to be __device__, and we can't declare __device__ in ATen.
-  union Payload {
-    uint64_t val;
-    int64_t* ptr;
-  };
-
-  uint64_t seed_;
-  Payload offset_;
-  uint32_t offset_intragraph_;
-  bool captured_ = false;
-};
+// Pulls raw PhiloxCudaState definition into at:: as expected by eager consumers
+#include <ATen/cuda/detail/PhiloxCudaStateRaw.cu>
 
 struct TORCH_CUDA_API CUDAGeneratorImpl : public c10::GeneratorImpl {
   // Constructors

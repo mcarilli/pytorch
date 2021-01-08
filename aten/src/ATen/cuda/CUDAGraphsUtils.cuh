@@ -10,23 +10,10 @@ namespace at {
 namespace cuda {
 namespace philox {
 
-// We can't write a __device__ function in CUDAGeneratorImpl.h, because it's in ATen.
-// Also, whatever call unpacks PhiloxCudaState in consumer kernels must be inlineable.
-// Easiest thing that comes to mind is, define a free function here, in ATen/cuda.
-// Any cuda consumer can include this header.
-//
-// WARNING:
-// torch/csrc/jit/codegen/cuda/runtime/rng_utils.cu contains a copy paste of this definition.
-// (they didn't want to codegen based on something in ATen).
-// If you change the definition here, you must change the definition there to match.
-__device__ __forceinline__ std::tuple<uint64_t, uint64_t>
-unpack(at::PhiloxCudaState arg) {
-  if (arg.captured_) {
-    return std::make_tuple(arg.seed_, *(arg.offset_.ptr) + arg.offset_intragraph_);
-  } else {
-    return std::make_tuple(arg.seed_, arg.offset_.val);
-  }
-}
+// Pulls raw
+// std::tuple<uint64_t, uint64_t> unpack(at::PhiloxCudaState arg)
+// definition into at::cuda::philox as expected by eager consumers
+#include <ATen/cuda/detail/UnpackRaw.cu>
 
 } // namespace philox
 
