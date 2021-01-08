@@ -803,8 +803,8 @@ if(USE_CUDA OR USE_ROCM)
     ${TORCH_SRC_DIR}/csrc/jit/codegen/cuda/runtime/random_numbers.cu
     ${TORCH_SRC_DIR}/csrc/jit/codegen/cuda/runtime/tensor.cu
     ${TORCH_SRC_DIR}/csrc/jit/codegen/cuda/runtime/welford.cu
-    ${TORCH_SRC_DIR}/../aten/src/cuda/detail/PhiloxCudaStateRaw.cuh
-    ${TORCH_SRC_DIR}/../aten/src/cuda/detail/UnpackRaw.cuh
+    ${CMAKE_CURRENT_SOURCE_DIR}/../aten/src/cuda/detail/PhiloxCudaStateRaw.cuh
+    ${CMAKE_CURRENT_SOURCE_DIR}/../aten/src/cuda/detail/UnpackRaw.cuh
   )
 
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/include/nvfuser_resources")
