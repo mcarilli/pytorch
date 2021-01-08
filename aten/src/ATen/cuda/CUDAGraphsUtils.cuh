@@ -2,20 +2,13 @@
 
 #include <ATen/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAEvent.h>
+#include <ATen/cuda/detail/UnpackRaw.cuh>
 #include <ATen/detail/CUDAHooksInterface.h>
 #include <c10/core/StreamGuard.h>
 #include <c10/cuda/CUDAGuard.h>
 
 namespace at {
 namespace cuda {
-namespace philox {
-
-// Pulls raw
-// std::tuple<uint64_t, uint64_t> unpack(at::PhiloxCudaState arg)
-// definition into at::cuda::philox as expected by eager consumers
-#include <ATen/cuda/detail/UnpackRaw.cuh>
-
-} // namespace philox
 
 #if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
 // Protects against enum cudaStreamCaptureStatus implementation changes.

@@ -93,7 +93,7 @@ class CudaKernelGenerator : private kir::IrVisitor {
 
     // Kernels generating random numbers take extra (seed, offset) arguments
     if (kernel_summary.is_stochastic) {
-      code_ << ", PhiloxCudaState philox_args";
+      code_ << ", at::PhiloxCudaState philox_args";
     }
 
     code_ << ") ";
@@ -106,7 +106,7 @@ class CudaKernelGenerator : private kir::IrVisitor {
     // Random number generator (optional)
     if (kernel_summary.is_stochastic) {
       indent() << "const int idx = blockIdx.x*blockDim.x + threadIdx.x;\n";
-      indent() << "auto seeds = unpack(philox_args)\n";
+      indent() << "auto seeds = at::cuda::philox::unpack(philox_args)\n";
       indent() << "Philox rnd(std::get<0>(seeds), idx, std::get<1>(seeds));\n";
     }
 

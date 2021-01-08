@@ -2,6 +2,7 @@
 
 #include <c10/core/GeneratorImpl.h>
 #include <ATen/core/Generator.h>
+#include <ATen/cuda/detail/PhiloxCudaStateRaw.cuh>
 #include <ATen/Tensor.h>
 #include <ATen/Context.h>
 #include <limits>
@@ -88,9 +89,6 @@ namespace at {
  * }
  *
  */
-
-// Pulls raw PhiloxCudaState definition into at:: as expected by eager consumers
-#include <ATen/cuda/detail/PhiloxCudaStateRaw.cuh>
 
 struct TORCH_CUDA_API CUDAGeneratorImpl : public c10::GeneratorImpl {
   // Constructors

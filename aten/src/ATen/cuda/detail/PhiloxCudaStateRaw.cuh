@@ -1,6 +1,8 @@
 // Stores RNG state values. Passed as a kernel argument. See Note [CUDA Graph-safe RNG states].
 //
 // The raw definition lives in its own file so jit codegen can easily copy it.
+namespace at {
+
 struct PhiloxCudaState {
   PhiloxCudaState() = default;
   PhiloxCudaState(const PhiloxCudaState&) = default;
@@ -33,3 +35,5 @@ struct PhiloxCudaState {
   uint32_t offset_intragraph_;
   bool captured_ = false;
 };
+
+} // namespace at
