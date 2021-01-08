@@ -13,7 +13,7 @@ namespace philox {
 // Pulls raw
 // std::tuple<uint64_t, uint64_t> unpack(at::PhiloxCudaState arg)
 // definition into at::cuda::philox as expected by eager consumers
-#include <ATen/cuda/detail/UnpackRaw.cu>
+#include <ATen/cuda/detail/UnpackRaw.cuh>
 
 } // namespace philox
 

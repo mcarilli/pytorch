@@ -16,8 +16,8 @@ namespace at {
  * Strategy:
  * ~~~~~~~~~
  * (It helps to look at
- * cuda/detail/PhiloxCudaStateRaw.cu and
- * cuda/detail/UnpackRaw.cu
+ * cuda/detail/PhiloxCudaStateRaw.cuh and
+ * cuda/detail/UnpackRaw.cuh
  * while you read this.)
  *
  * A CUDA graph containing multiple RNG ops behaves like a
@@ -90,7 +90,7 @@ namespace at {
  */
 
 // Pulls raw PhiloxCudaState definition into at:: as expected by eager consumers
-#include <ATen/cuda/detail/PhiloxCudaStateRaw.cu>
+#include <ATen/cuda/detail/PhiloxCudaStateRaw.cuh>
 
 struct TORCH_CUDA_API CUDAGeneratorImpl : public c10::GeneratorImpl {
   // Constructors
