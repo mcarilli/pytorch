@@ -19,8 +19,8 @@
 #include <nvfuser_resources/random_numbers.h>
 #include <nvfuser_resources/tensor.h>
 #include <nvfuser_resources/welford.h>
-#include <nvfuser_resources/PhiloxCudaStateRaw.cuh>
-#include <nvfuser_resources/UnpackRaw.cuh>
+#include <nvfuser_resources/PhiloxCudaStateRaw.h>
+#include <nvfuser_resources/UnpackRaw.h>
 
 #include <fstream>
 
