@@ -5,7 +5,6 @@ namespace at {
 
 struct PhiloxCudaState {
   PhiloxCudaState() = default;
-  PhiloxCudaState(const PhiloxCudaState&) = default;
   // Called if graph capture is not underway
   PhiloxCudaState(uint64_t seed,
                   uint64_t offset) {
@@ -30,9 +29,9 @@ struct PhiloxCudaState {
     int64_t* ptr;
   };
 
-  uint64_t seed_;
+  uint64_t seed_ = 0;
   Payload offset_;
-  uint32_t offset_intragraph_;
+  uint32_t offset_intragraph_ = 0;
   bool captured_ = false;
 };
 

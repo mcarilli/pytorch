@@ -12,12 +12,26 @@ namespace at {
 namespace cuda {
 namespace philox {
 
-__device__ __forceinline__ std::tuple<uint64_t, uint64_t>
+struct SeedOffset {
+  __device__ __forceinline__ SeedOffset(uint64_t _seed, uint64_t _offset) : seed_(_seed), offset_(_offset) {}
+  __device__ __forceinline__ uint64_t seed() const {
+    return seed_;
+  }
+  __device__ __forceinline__ uint64_t offset() const {
+    return offset_;
+  }
+  private:
+  uint64_t seed_;
+  uint64_t offset_;
+};
+
+__device__ __forceinline__ SeedOffset
 unpack(at::PhiloxCudaState arg) {
   if (arg.captured_) {
-    return std::make_tuple(arg.seed_, *(arg.offset_.ptr) + arg.offset_intragraph_);
+    // static_cast avoids "warning: invalid narrowing conversion from "long" to "unsigned long".
+    return {arg.seed_, static_cast<uint64_t>(*(arg.offset_.ptr)) + arg.offset_intragraph_};
   } else {
-    return std::make_tuple(arg.seed_, arg.offset_.val);
+    return {arg.seed_, arg.offset_.val};
   }
 }
 
