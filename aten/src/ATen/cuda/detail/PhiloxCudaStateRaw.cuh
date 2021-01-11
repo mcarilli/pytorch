@@ -1,4 +1,9 @@
-// Stores RNG state values. Passed as a kernel argument. See Note [CUDA Graph-safe RNG states].
+// No "#pragma once" because this is a raw definition that can be copied by jit codegen.
+// Eager mode clients should not include this file directly, instead,
+// they should #include <ATen/CUDAGeneratorImpl.h>, which has a #pragma once.
+
+// Stores RNG state values. Passed as a kernel argument.
+// See Note [CUDA Graph-safe RNG states].
 //
 // The raw definition lives in its own file so jit codegen can easily copy it.
 namespace at {

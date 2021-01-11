@@ -1,11 +1,14 @@
+// No "#pragma once" because this is a raw definition that can be copied by jit codegen.
+// Eager mode clients should not include this file directly, instead,
+// they should #include <ATen/cuda/CUDAGraphsUtils.cuh>, which has a #pragma once.
+
 // In-kernel call to retrieve philox seed and offset from a  PhiloxCudaState instance whether
 // that instance was created with graph capture underway or not.
 // See Note [CUDA Graph-safe RNG states].
 //
 // We can't write a __device__ function in CUDAGeneratorImpl.h, because it's in ATen.
 // Also, whatever call unpacks PhiloxCudaState in consumer kernels must be inlineable.
-// Easiest thing that comes to mind is, define a free function here, in ATen/cuda.
-// Any cuda consumer can include this header.
+// Easiest thing that comes to mind is, define __device__ helpers here, in ATen/cuda.
 //
 // The raw definition lives in its own file so jit codegen can easily copy it.
 namespace at {
