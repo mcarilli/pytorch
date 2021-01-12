@@ -76,10 +76,6 @@ void KernelArgumentHolder::push(const IValue& val) {
       " Tried to create argument to send to a fused kernel, but got a non-scalar type.");
 }
 
-void KernelArgumentHolder::push(const uint64_t& val) {
-  arguments_.push_back(std::make_unique<ULongArg>(val));
-}
-
 void KernelArgumentHolder::push(const at::PhiloxCudaState& val) {
   arguments_.push_back(std::make_unique<PhiloxCudaStateArg>(val));
 }

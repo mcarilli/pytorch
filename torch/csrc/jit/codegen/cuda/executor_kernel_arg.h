@@ -155,8 +155,6 @@ class KernelArgumentHolder {
   // Push a scalar or integer to the arguments
   void push(const IValue& val);
 
-  void push(const uint64_t& val);
-
   void push(const at::PhiloxCudaState& val);
 
   // Create buffer, flatten arguments into it, align by 8 Bytes, return pointers
