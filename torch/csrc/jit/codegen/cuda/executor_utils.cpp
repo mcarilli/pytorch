@@ -102,6 +102,9 @@ bool validateKernelArgTensor(
     case at::ScalarType::Long:
       match = param_data_type == DataType::Int;
       break;
+    case at::ScalarType::Int:
+      match = param_data_type == DataType::Int32;
+      break;
     case at::ScalarType::Bool:
       match = param_data_type == DataType::Bool;
       break;
@@ -130,7 +133,7 @@ bool validateKernelArgScalar(
   bool match = false;
   switch (arg.toScalar().type()) {
     case c10::ScalarType::Long:
-      match = param_type == DataType::Int;
+      match = param_type == DataType::Int || param_type == DataType::Int32;
       break;
     case c10::ScalarType::Double:
       match = param_type == DataType::Double || param_type == DataType::Float ||
@@ -365,7 +368,7 @@ NvrtcFunction nvrtcCompile(
   const std::string compute = "--gpu-architecture=compute_" +
       std::to_string(major) + std::to_string(minor);
   std::vector<const char*> args = {
-      "--std=c++14", compute.c_str(), "-default-device"};
+      "--std=c++14", "--use_fast_math", compute.c_str(), "-default-device"};
 #endif
 
   const char* disable_fma = getenv("PYTORCH_NVFUSER_DISABLE_FMA");
