@@ -90,7 +90,7 @@ namespace at {
  *
  */
 
-struct TORCH_CUDA_API CUDAGeneratorImpl : public c10::GeneratorImpl {
+struct TORCH_CUDA_CPP_API CUDAGeneratorImpl : public c10::GeneratorImpl {
   // Constructors
   CUDAGeneratorImpl(DeviceIndex device_index = -1);
   ~CUDAGeneratorImpl() = default;
