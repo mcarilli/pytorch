@@ -2936,7 +2936,7 @@ t2.start()
         #
         # (For the raw native_dropout call, p is the probability a value is kept,
         # not the probability it's zeroed.)
-        ops_with_kwargs = ((torch.native_dropout, {"p": 0.9, "scale": 1./0.9, "train": True}),
+        ops_with_kwargs = ((torch.native_dropout, {"p": 0.9, "scale": 1. / 0.9, "train": True}),
                            (torch.nn.functional.rrelu, {"training": True}),)
         size = 10000
 
