@@ -2927,13 +2927,16 @@ t2.start()
     def test_graph_rng_functional(self):
         # The caching allocator isn't yet graph-safe.
         # In this test, graphed regions try to ensure allocator safety by
-        # stashing references to all temporaries.  This is why we use _fused_dropout
-        # instead of a public dropout API:  _fused_dropout returns the mask temporary
+        # stashing references to all temporaries.  This is why we use native_dropout
+        # instead of a public dropout API:  native_dropout returns the mask temporary
         # as well as the output, so we can stash references to both.
         #
         # TODO:
         # Switch to public dropout API when the allocator is made graph-safe.
-        ops_with_kwargs = ((torch._fused_dropout, {"p": 0.1}),
+        #
+        # (For the raw native_dropout call, p is the probability a value is kept,
+        # not the probability it's zeroed.)
+        ops_with_kwargs = ((torch.native_dropout, {"p": 0.9, "scale": 1./0.9, "train": True}),
                            (torch.nn.functional.rrelu, {"training": True}),)
         size = 10000
 
@@ -2946,7 +2949,7 @@ t2.start()
             eager_out = a
             for _ in range(6):
                 out = op(eager_out, **kwargs)
-                # _fused_dropout returns a tuple, rrelu returns a bare tensor.
+                # native_dropout returns a tuple, rrelu returns a bare tensor.
                 eager_out = out[0] if isinstance(out, tuple) else out
 
             graph_in = a.clone()
