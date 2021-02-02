@@ -51,9 +51,9 @@ fused_dropout_kernel_vec(at::cuda::detail::TensorInfo<scalar_t, IndexType> a,
   auto seeds = at::cuda::philox::unpack(philox_args);
   IndexType idx = blockIdx.x * blockDim.x + threadIdx.x;
   curandStatePhilox4_32_10_t state;
-  curand_init(seeds.seed(),
+  curand_init(std::get<0>(seeds),
               idx,
-              seeds.offset(),
+              std::get<1>(seeds),
               &state);
 
   // Helps align the total number of times curand_uniform4 is called by each thread for the same totalElements
@@ -134,9 +134,9 @@ fused_dropout_kernel(cuda::detail::TensorInfo<scalar_t, IndexType> a,
   auto seeds = at::cuda::philox::unpack(philox_args);
   IndexType idx = blockIdx.x * blockDim.x + threadIdx.x;
   curandStatePhilox4_32_10_t state;
-  curand_init(seeds.seed(),
+  curand_init(std::get<0>(seeds),
               idx,
-              seeds.offset(),
+              std::get<1>(seeds),
               &state);
 
   IndexType rounded_size = ((totalElements - 1)/(blockDim.x * gridDim.x * UNROLL)+1) *

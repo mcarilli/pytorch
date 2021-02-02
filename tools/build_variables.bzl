@@ -30,8 +30,6 @@ libtorch_nvfuser_runtime_sources = [
     "torch/csrc/jit/codegen/cuda/runtime/random_numbers.cu",
     "torch/csrc/jit/codegen/cuda/runtime/tensor.cu",
     "torch/csrc/jit/codegen/cuda/runtime/welford.cu",
-    "aten/src/ATen/cuda/detail/PhiloxCudaStateRaw.cuh",
-    "aten/src/ATen/cuda/detail/UnpackRaw.cuh",
 ]
 
 libtorch_nvfuser_generated_headers = ["{}.h".format(name[36:-3]) for name in libtorch_nvfuser_runtime_sources]
@@ -376,6 +374,7 @@ libtorch_cuda_core_sources = [
     "torch/csrc/jit/codegen/cuda/fusion.cpp",
     "torch/csrc/jit/codegen/cuda/graph_fuser.cpp",
     "torch/csrc/jit/codegen/cuda/index_compute.cpp",
+    "torch/csrc/jit/codegen/cuda/index_reference_replay.cpp",
     "torch/csrc/jit/codegen/cuda/instrumentation.cpp",
     "torch/csrc/jit/codegen/cuda/ir_base_nodes.cpp",
     "torch/csrc/jit/codegen/cuda/ir_cloner.cpp",
@@ -392,6 +391,7 @@ libtorch_cuda_core_sources = [
     "torch/csrc/jit/codegen/cuda/kernel_ir_printer.cpp",
     "torch/csrc/jit/codegen/cuda/lower_alias_memory.cpp",
     "torch/csrc/jit/codegen/cuda/lower_allocation.cpp",
+    "torch/csrc/jit/codegen/cuda/lower_compute_at_map.cpp",
     "torch/csrc/jit/codegen/cuda/lower_expr_sort.cpp",
     "torch/csrc/jit/codegen/cuda/lower_index.cpp",
     "torch/csrc/jit/codegen/cuda/lower_insert_syncs.cpp",
