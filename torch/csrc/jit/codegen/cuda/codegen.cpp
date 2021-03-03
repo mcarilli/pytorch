@@ -106,7 +106,7 @@ class CudaKernelGenerator : private kir::IrVisitor {
     if (kernel_summary.is_stochastic) {
       indent() << "const int idx = blockIdx.x*blockDim.x + threadIdx.x;\n";
       indent() << "auto seeds = at::cuda::philox::unpack(philox_args)\n";
-      indent() << "Philox rnd(seeds.seed(), idx, seeds.offset());\n";
+      indent() << "Philox rnd(std::get<0>(seeds), idx, std::get<1>(seeds));\n";
     }
 
     // Do we have any dynamic shared memory buffers?
