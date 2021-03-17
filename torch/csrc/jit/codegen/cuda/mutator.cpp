@@ -1,7 +1,7 @@
-#include <torch/csrc/jit/codegen/cuda/mutator.h>
-
+#include <c10/util/irange.h>
 #include <torch/csrc/jit/codegen/cuda/fusion.h>
 #include <torch/csrc/jit/codegen/cuda/ir_all_nodes.h>
+#include <torch/csrc/jit/codegen/cuda/mutator.h>
 
 #include <vector>
 
@@ -27,7 +27,7 @@ Statement* OptOutMutator::mutate(IterDomain* id) {
 Statement* OptOutMutator::mutate(TensorDomain* td) {
   std::vector<IterDomain*> dom;
   bool mutated = false;
-  for (decltype(td->nDims()) i = 0; i < td->nDims(); i++) {
+  for (const auto i : c10::irange(td->nDims())) {
     IterDomain* id = mutateAsVal(td->axis(i))->as<IterDomain>();
     dom.push_back(id);
     if (!id->sameAs(td->axis(i)))
@@ -46,20 +46,8 @@ Statement* OptOutMutator::mutate(TensorDomain* td) {
 Statement* OptOutMutator::mutate(TensorView* tv) {
   TensorDomain* td = mutateAsVal(tv->domain())->as<TensorDomain>();
 
-  TensorView* computeAtView = nullptr;
-  if (tv->hasComputeAt()) {
-    computeAtView = mutateAsVal(tv->getComputeAtView())->as<TensorView>();
-  }
-
-  if (!tv->domain()->sameAs(td) ||
-      (tv->hasComputeAt() && !tv->getComputeAtView()->sameAs(computeAtView))) {
+  if (!tv->domain()->sameAs(td)) {
     TensorView* mutated_tv = new TensorView(td, tv->getDataType().value());
-    if (tv->hasComputeAt()) {
-      mutated_tv->setComputeAt(
-          computeAtView,
-          (int)tv->getThisComputeAtAxis(),
-          (int)(tv->getRelativeComputeAtAxis()));
-    }
     registerMutation(tv, mutated_tv);
     return mutated_tv;
   }
@@ -151,6 +139,54 @@ Statement* OptOutMutator::mutate(ReductionOp* rop) {
     return rop;
 
   return new ReductionOp(rop->getReductionOpType(), init, out, in);
+}
+
+namespace {
+__inline__ bool compareOptional(Val* a, Val* b) {
+  if (!a || !b) {
+    return (!a && !b);
+  }
+  return a->sameAs(b);
+}
+
+} // namespace
+
+Statement* OptOutMutator::mutate(WelfordOp* wop) {
+  Val* out_var = mutateAsVal(wop->outVar())->asVal();
+  Val* out_avg = mutateAsVal(wop->outAvg())->asVal();
+  Val* out_N = mutateAsVal(wop->outN())->asVal();
+
+  Val* in_var = wop->inVar() ? mutateAsVal(wop->inVar())->asVal() : nullptr;
+  Val* in_avg = mutateAsVal(wop->inAvg())->asVal();
+  Val* in_N = mutateAsVal(wop->inN())->asVal();
+
+  Val* init_var =
+      wop->initVar() ? mutateAsVal(wop->initVar())->asVal() : nullptr;
+  Val* init_avg =
+      wop->initAvg() ? mutateAsVal(wop->initAvg())->asVal() : nullptr;
+  Val* init_N = mutateAsVal(wop->initN())->asVal();
+
+  const bool out_compare = out_var->sameAs(wop->outVar()) &&
+      out_avg->sameAs(wop->outAvg()) && out_N->sameAs(wop->outN());
+  const bool in_compare = compareOptional(in_var, wop->inVar()) &&
+      in_avg->sameAs(wop->inAvg()) && in_N->sameAs(wop->inN());
+  const bool init_compare = compareOptional(init_var, wop->initVar()) &&
+      compareOptional(init_avg, wop->initAvg()) && init_N->sameAs(wop->initN());
+
+  if (out_compare && init_compare && in_compare) {
+    return wop;
+  } else {
+    return new WelfordOp(
+        out_var,
+        out_avg,
+        out_N,
+        init_var,
+        init_avg,
+        init_N,
+        in_var,
+        in_avg,
+        in_N);
+  }
 }
 
 Statement* OptOutMutator::mutate(BroadcastOp* bop) {

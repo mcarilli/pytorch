@@ -15,12 +15,22 @@ namespace at { namespace native {
 // linear algebra operations
 
 template<class scalar_t>
-void lapackEig(char jobvl, char jobvr, int n, scalar_t *a, int lda, scalar_t *wr, scalar_t *wi, scalar_t* vl, int ldvl, scalar_t *vr, int ldvr, scalar_t *work, int lwork, int *info);
+void lapackCholeskyInverse(char uplo, int n, scalar_t *a, int lda, int *info);
+
+template<class scalar_t, class value_t=scalar_t>
+void lapackEig(char jobvl, char jobvr, int n, scalar_t *a, int lda, scalar_t *w, scalar_t* vl, int ldvl, scalar_t *vr, int ldvr, scalar_t *work, int lwork, value_t *rwork, int *info);
 
 template<class scalar_t>
 void lapackOrgqr(int m, int n, int k, scalar_t *a, int lda, scalar_t *tau, scalar_t *work, int lwork, int *info);
 
+template <class scalar_t>
+void lapackTriangularSolve(char uplo, char trans, char diag, int n, int nrhs, scalar_t* a, int lda, scalar_t* b, int ldb, int* info);
+
 #endif
+
+using cholesky_inverse_fn = Tensor& (*)(Tensor& /*result*/, Tensor& /*infos*/, bool /*upper*/);
+
+DECLARE_DISPATCH(cholesky_inverse_fn, cholesky_inverse_stub);
 
 using eig_fn = std::tuple<Tensor, Tensor> (*)(const Tensor&, bool&);
 
@@ -75,7 +85,7 @@ inline void apply_orgqr(Tensor& self, const Tensor& tau, Tensor& infos, int64_t 
   int lwork = -1;
   scalar_t wkopt;
   lapackOrgqr<scalar_t>(m, n_columns, k, self_data, lda, tau_data, &wkopt, lwork, &infos_data[0]);
-  lwork = static_cast<int>(real_impl<scalar_t, value_t>(wkopt));
+  lwork = std::max<int>(1, real_impl<scalar_t, value_t>(wkopt));
   Tensor work = at::empty({lwork}, self.options());
 
   for (int64_t i = 0; i < batch_size; i++) {
@@ -93,5 +103,15 @@ inline void apply_orgqr(Tensor& self, const Tensor& tau, Tensor& infos, int64_t 
 
 using orgqr_fn = Tensor& (*)(Tensor& /*result*/, const Tensor& /*tau*/, Tensor& /*infos*/, int64_t /*n_columns*/);
 DECLARE_DISPATCH(orgqr_fn, orgqr_stub);
+
+using triangular_solve_fn = void (*)(
+    Tensor& /*A*/,
+    Tensor& /*b*/,
+    Tensor& /*infos*/,
+    bool /*upper*/,
+    bool /*transpose*/,
+    bool /*conjugate_transpose*/,
+    bool /*unitriangular*/);
+DECLARE_DISPATCH(triangular_solve_fn, triangular_solve_stub);
 
 }} // namespace at::native

@@ -163,6 +163,94 @@ class TORCH_CUDA_CU_API ReductionOp : public Expr {
   Val* const in_ = nullptr;
 };
 
+//! Welford Scan operation.
+class TORCH_CUDA_CU_API WelfordOp : public Expr {
+ public:
+  WelfordOp(
+      Val* out_var,
+      Val* out_avg,
+      Val* out_N,
+      Val* init_var,
+      Val* init_avg,
+      Val* init_N,
+      Val* in_var,
+      Val* in_avg,
+      Val* in_N);
+
+  WelfordOp(const WelfordOp* src, IrCloner* ir_cloner);
+
+  Val* out() const {
+    return out_avg_;
+  }
+
+  Val* in() const {
+    return in_avg_;
+  }
+
+  Val* init() const {
+    return init_avg_;
+  }
+
+  bool sameAs(const Statement* const other) const override;
+
+  // Welford Accessors
+  // TODO clean up
+  Val* outVar() const {
+    return out_var_;
+  }
+
+  Val* outAvg() const {
+    return out_avg_;
+  }
+
+  Val* outN() const {
+    return out_N_;
+  }
+
+  Val* inVar() const {
+    return in_var_;
+  }
+
+  Val* inAvg() const {
+    return in_avg_;
+  }
+
+  Val* inN() const {
+    return in_N_;
+  }
+
+  Val* initVar() const {
+    return init_var_;
+  }
+
+  Val* initAvg() const {
+    return init_avg_;
+  }
+
+  Val* initN() const {
+    return init_N_;
+  }
+
+  bool singleValue() const {
+    return in_N_->isOneInt();
+  }
+
+  bool hasInit() const {
+    return !init_N_->isZeroInt();
+  }
+
+ private:
+  Val* const out_var_;
+  Val* const out_avg_;
+  Val* const out_N_;
+  Val* const init_var_;
+  Val* const init_avg_;
+  Val* const init_N_;
+  Val* const in_var_;
+  Val* const in_avg_;
+  Val* const in_N_;
+};
+
 class TORCH_CUDA_CU_API TransposeOp : public Expr {
  public:
   TransposeOp(TensorView* out, TensorView* in, std::vector<int> new2old);
@@ -247,7 +335,7 @@ class TORCH_CUDA_CU_API IterDomain : public Val {
   IterDomain* clone() const {
     return new IterDomain(
         start(),
-        extent(),
+        rawExtent(),
         getParallelType(),
         getIterType(),
         isRFactorProduct());
@@ -337,6 +425,12 @@ class TORCH_CUDA_CU_API IterDomain : public Val {
 
   //! Check if IterDomain is a reduction axis with size of 1, i.e.
   //! a "squeeze" operator.
+  //!
+  //! NOTE: Detection of trivial reduction here is not
+  //! comprehensive. See detectTrivialReductionDerivedDomains for more
+  //! comprehensive analysis. We typically use this for root domain trivial
+  //! reduction checks. So we ship to the correct scheduler. It may
+  //! not be incredibly robust, but it makes sense to keep it for now.
   bool isTrivialReduction() const {
     return isReduction() && rawExtent()->isOneInt();
   }

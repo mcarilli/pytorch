@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import pickle
+import io
 import torch
 import warnings
 import time
@@ -33,6 +34,8 @@ _MPI_AVAILABLE = True
 _NCCL_AVAILABLE = True
 _GLOO_AVAILABLE = True
 
+_pickler = pickle.Pickler
+_unpickler = pickle.Unpickler
 
 try:
     from torch._C._distributed_c10d import ProcessGroupMPI
@@ -1406,8 +1409,9 @@ def all_gather_multigpu(output_tensor_lists,
 
 
 def _object_to_tensor(obj):
-    buffer = pickle.dumps(obj)
-    byte_storage = torch.ByteStorage.from_buffer(buffer)  # type: ignore[attr-defined]
+    f = io.BytesIO()
+    _pickler(f).dump(obj)
+    byte_storage = torch.ByteStorage.from_buffer(f.getvalue())  # type: ignore[attr-defined]
     byte_tensor = torch.ByteTensor(byte_storage)
     local_size = torch.LongTensor([byte_tensor.numel()])
     return byte_tensor, local_size
@@ -1415,8 +1419,7 @@ def _object_to_tensor(obj):
 
 def _tensor_to_object(tensor, tensor_size):
     buf = tensor.numpy().tobytes()[:tensor_size]
-    out = pickle.loads(buf)
-    return out
+    return _unpickler(io.BytesIO(buf)).load()
 
 
 def all_gather_object(object_list, obj, group=None):
@@ -1430,7 +1433,7 @@ def all_gather_object(object_list, obj, group=None):
             size of the group for this collective and will contain the output.
         object (Any): Pickable Python object to be broadcast from current process.
         group (ProcessGroup, optional): The process group to work on. If None,
-            the default process group will be used.
+            the default process group will be used. Default is ``None``.
 
     Returns:
         None. If the calling rank is part of this group, the output of the
@@ -1521,7 +1524,7 @@ def gather_object(obj, object_gather_list=None, dst=0, group=None):
             ranks. (default is ``None``)
         dst (int, optional): Destination rank. (default is 0)
         group: (ProcessGroup, optional): The process group to work on. If None,
-            the default process group will be used.
+            the default process group will be used. Default is ``None``.
 
     Returns:
         None. On the ``dst`` rank, ``object_gather_list`` will contain the
@@ -1607,7 +1610,7 @@ def gather_object(obj, object_gather_list=None, dst=0, group=None):
         object_gather_list[i] = _tensor_to_object(tensor, tensor_size)
 
 
-def broadcast_object_list(object_list, src, group=None):
+def broadcast_object_list(object_list, src=0, group=None):
     """
     Broadcasts picklable objects in ``object_list`` to the whole group. Similar
     to :func:`broadcast`, but Python objects can be passed in.
@@ -1620,7 +1623,7 @@ def broadcast_object_list(object_list, src, group=None):
             be broadcast, but each rank must provide lists of equal sizes.
         src (int): Source rank from which to broadcast ``object_list``.
         group: (ProcessGroup, optional): The process group to work on. If None,
-            the default process group will be used.
+            the default process group will be used. Default is ``None``.
 
     Returns:
         ``None``. If rank is part of the group, ``object_list`` will contain the
@@ -1700,7 +1703,7 @@ def broadcast_object_list(object_list, src, group=None):
 
 
 def scatter_object_list(
-    scatter_object_output_list, scatter_object_input_list, src=0, group=group.WORLD
+    scatter_object_output_list, scatter_object_input_list, src=0, group=None
 ):
     """
     Scatters picklable objects in ``scatter_object_input_list`` to the whole
@@ -1717,7 +1720,8 @@ def scatter_object_list(
             be scattered, and the argument can be ``None`` for non-src ranks.
         src (int): Source rank from which to scatter
             ``scatter_object_input_list``.
-        group: (ProcessGroup, optional): The process group to work on.
+        group: (ProcessGroup, optional): The process group to work on. If None,
+            the default process group will be used. Default is ``None``.
 
     Returns:
         ``None``. If rank is part of the group, ``scatter_object_output_list``

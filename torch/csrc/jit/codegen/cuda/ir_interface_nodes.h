@@ -16,6 +16,8 @@ namespace jit {
 namespace fuser {
 namespace cuda {
 
+class WelfordResult;
+
 //! A Bool value
 //!
 //! This value can be a symbolic value (defined after the kernel
@@ -106,9 +108,16 @@ class TORCH_CUDA_CU_API Int : public Val {
   const c10::optional<ScalarType> maybe_value_;
 };
 
+//! Mode during propagation of computeAt, standard will throw an error if
+//! computeAt position provided can't be satisfied, best effort will lower the
+//! computeAt position as needed during traversal, most inlined will increase
+//! the compute at position to maximum possible through traversal.
+enum class ComputeAtMode { Standard, BestEffort, MostInlined };
+
 class ComputeAt;
-class TransformReplay;
+class TransformPropagator;
 class TransformIter;
+class TransformReplay;
 class OptOutMutator;
 
 namespace ir_utils {
@@ -182,56 +191,44 @@ class TORCH_CUDA_CU_API TensorView : public Val {
 
   IterDomain* axis(int pos) const;
 
-  // Is there an active computeAt TensorView/Axis
+  // Does it share outer axes with other tensors?
   bool hasComputeAt() const {
-    return compute_at_view_ != nullptr;
-  }
-
-  // Return the TensorView we're computing at
-  TensorView* getComputeAtView() const {
-    return compute_at_view_;
+    return compute_at_pos_ > 0;
   }
 
   size_t nDims() const;
 
-  // Return compute at axis relative to this domain
-  unsigned int getThisComputeAtAxis() const {
-    return this_compute_at_axis_;
+  // Returns the position that this tensor is produced at relative to its axes.
+  unsigned int getComputeAtPosition() const {
+    return compute_at_pos_;
   }
 
-  // Return compute at axis relative to compute at view
-  unsigned int getRelativeComputeAtAxis() const {
-    return relative_compute_at_axis_;
+  // Returns the maximum position of producers are being computed at relative to
+  // this tensor. This position dictates the clear expectations of producers.
+  unsigned int getMaxProducerPosition() const {
+    return max_producer_pos_;
   }
 
-  // Return position in compute_at_view that lines up with this->axis(pos)?
-  int getComputeAtRelPos(int pos) const;
+  //! Compute this TensorView relative to a consumer position, -1 will
+  //! compute tensors inline with each other, 0 doesn't share
+  //! any loop nests between the tensors. It's an error when the given
+  //! position is not legally viable. Alternatively, when the mode
+  //! parameter is ComputeAtMode::BestEffort, the position is lowered
+  //! one by one until a valid position is found. When
+  //! ComputeAtMode::MostInlined is given, the position parameter is
+  //! ignored, and the deepest possible position is searched.
+  TensorView* computeAt(
+      TensorView* consumer,
+      int position,
+      ComputeAtMode mode = ComputeAtMode::Standard);
 
-  // Will check if an axis is inside computeAtAxis and will fetch the reference
-  // to be used in code generation.
-  std::pair<int, const TensorView*> getComputeAtPos(int pos) const {
-    pos = normalizeAxisPos(pos);
-    TORCH_INTERNAL_ASSERT(
-        nDims() > 0, "Tried to access a computeAt axis in a 0-dim TensorView");
-    if (!hasComputeAt() || getThisComputeAtAxis() <= (unsigned int)pos)
-      return std::make_pair(pos, this);
-    return compute_at_view_->getComputeAtPos(getComputeAtRelPos(pos));
-  }
-
-  std::pair<IterDomain*, const TensorView*> getComputeAtAxis(int pos) const {
-    const auto computeAtPos = getComputeAtPos(pos);
-    return std::make_pair(
-        computeAtPos.second->axis(computeAtPos.first), computeAtPos.second);
-  }
-
-  // Compute this TensorView relative to another tensor at axis
-  TensorView* computeAt(TensorView* consumer, int axis);
-
-  void clearComputeAt() {
-    this_compute_at_axis_ = 0;
-    relative_compute_at_axis_ = 0;
-    compute_at_view_ = nullptr;
-  }
+  //! Compute this tensor to consumer, at local position, -1 will compute
+  //! tensors inline with eachother, 0 doesn't share any loop nests between the
+  //! tensors. The mode parameter can be used in the same manner as computeAt.
+  TensorView* computeWith(
+      TensorView* consumer,
+      int position,
+      ComputeAtMode mode = ComputeAtMode::Standard);
 
   // Split "axis" into 2 axes
   //! inner_split dictates if the factor section of the split should be inside
@@ -291,6 +288,15 @@ class TORCH_CUDA_CU_API TensorView : public Val {
   //
   TensorView* rFactor(const std::vector<int>& axes);
 
+  //! Welford Version of rFactor, semantically similar with
+  //!  the reduction version except that the rfactor is done
+  //!  in a multi-output scan pattern
+  WelfordResult rFactor(
+      const std::vector<int>& axes,
+      TensorView* var,
+      TensorView* avg,
+      TensorView* n);
+
   // For all usages of this TensorView, create a new TensorView and
   // duplicate the origin expression.
   // A common use case is to handle the recompute ComputeAt exception that
@@ -326,6 +332,7 @@ class TORCH_CUDA_CU_API TensorView : public Val {
     return axes_to_swizzle_;
   }
 
+  friend TORCH_CUDA_CU_API TransformPropagator;
   friend TORCH_CUDA_CU_API TransformReplay;
   friend TORCH_CUDA_CU_API OptOutMutator;
   friend ComputeAt;
@@ -337,9 +344,9 @@ class TORCH_CUDA_CU_API TensorView : public Val {
     domain_ = td;
   }
 
-  // Set all computeAt members without checking any correctness. Useful for
-  // computeAt with outputs relative to eachother
-  void setComputeAt(TensorView* computeAtView, int thisPos, int relPos);
+  void setComputeAt(unsigned int this_pos);
+
+  void setMaxProducer(unsigned int this_pos);
 
  private:
   int normalizeAxisPos(int pos) const {
@@ -364,12 +371,16 @@ class TORCH_CUDA_CU_API TensorView : public Val {
       TensorView* current,
       TensorView* producer);
 
+  //! A helper function to maintain the consistency of welford output
+  //! schedules when doing rfactor on welford ops.
+  TensorView* welfordRfactorHelper(
+      TensorView* tv,
+      const std::vector<int>& axes);
+
  private:
   TensorDomain* domain_ = nullptr;
-  TensorView* compute_at_view_ = nullptr;
-  // compute at axis in compute at view
-  unsigned int relative_compute_at_axis_ = 0;
-  unsigned int this_compute_at_axis_ = 0;
+  unsigned int compute_at_pos_ = 0;
+  unsigned int max_producer_pos_ = 0;
   MemoryType memory_type_ = MemoryType::Local;
   SwizzleType swizzle_type_ = SwizzleType::NoSwizzle;
   std::vector<IterDomain*> axes_to_swizzle_;

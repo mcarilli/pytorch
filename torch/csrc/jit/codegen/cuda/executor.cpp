@@ -121,6 +121,7 @@ void FusionExecutor::compileFusion(Fusion* fusion, CompileOptions options) {
   fusion_ = *fusion;
   FusionGuard fg(&fusion_);
   options_ = options;
+  c10::DeviceGuard dg(options_.device);
 
   TORCH_INTERNAL_ASSERT(
       options.device.is_cuda(), "Provided device to CUDA fuser is the CPU.");
@@ -278,28 +279,26 @@ LaunchParams FusionExecutor::computeLaunchParams(
   // If any dimension was set in launch constraints we need to run through
   // IterDomains that have been parallelized, and bind those values. Or make
   // sure if they could be inferred the inference matches what was set.
-  if (launch_constraints.nBlocks() * launch_constraints.nThreads() != -1) {
-    for (auto& entry : parallel_iter_extents) {
-      auto p_type = entry.first;
-      if (launch_constraints.hasDim(p_type)) {
-        auto parallel_extents = entry.second;
-        for (auto extent : parallel_extents) {
-          auto inferred_val = expr_eval.evaluate(extent);
-          if (inferred_val.has_value()) {
-            // This value could have been inferred, make sure it was set right.
-            bool valid =
-                inferred_val.value() == launch_constraints.getDim(p_type) ||
-                launch_constraints.getRawVal(p_type) == -1;
-            if (!useFallback() && !valid) {
-              TORCH_WARN_ONCE(
-                  "Cannot validate parallelization scheme, "
-                  "this may be due to mixed broadcast axes that are parallelized.");
-            }
-          } else {
-            // Bind the launch constraint into our evaluation context
-            expr_eval.bind(extent, launch_constraints.getDim(p_type));
-            launch_params.bind(launch_constraints.getDim(p_type), p_type);
+  for (auto& entry : parallel_iter_extents) {
+    auto p_type = entry.first;
+    if (launch_constraints.hasDim(p_type)) {
+      auto parallel_extents = entry.second;
+      for (auto extent : parallel_extents) {
+        auto inferred_val = expr_eval.evaluate(extent);
+        if (inferred_val.has_value()) {
+          // This value could have been inferred, make sure it was set right.
+          bool valid =
+              inferred_val.value() == launch_constraints.getDim(p_type) ||
+              launch_constraints.getRawVal(p_type) == -1;
+          if (!useFallback() && !valid) {
+            TORCH_WARN_ONCE(
+                "Cannot validate parallelization scheme, "
+                "this may be due to mixed broadcast axes that are parallelized.");
           }
+        } else {
+          // Bind the launch constraint into our evaluation context
+          expr_eval.bind(extent, launch_constraints.getDim(p_type));
+          launch_params.bind(launch_constraints.getDim(p_type), p_type);
         }
       }
     }
@@ -335,8 +334,15 @@ LaunchParams FusionExecutor::computeLaunchParams(
   if (has_workspace &&
       kernel_summary.largest_smem_data_type != DataType::Null) {
     // Not using nThreads here since it does not handle uninitialized value
+
+    // TODO: here is an optimization opportunity since welford uses int64_t for
+    // N while the data type is not neccessarily double. But it may need more
+    // work on the alignment
+    const int welford_factor =
+        kernel_summary.has_block_welford || kernel_summary.has_grid_welford ? 3
+                                                                            : 1;
     reduction_broadcast_workspace =
-        dataTypeSize(kernel_summary.largest_smem_data_type) *
+        dataTypeSize(kernel_summary.largest_smem_data_type) * welford_factor *
         launch_params.bdimx() * launch_params.bdimy() * launch_params.bdimz();
   }
 
@@ -473,6 +479,12 @@ std::vector<at::Tensor> FusionExecutor::runFusion(
     auto expr_eval = executor_utils::bindKernelInputs(inputs, kernel);
 
     launch_params = computeLaunchParams(launch_constraints, expr_eval);
+    if (isDebugDumpEnabled(DebugDumpOption::LaunchParam)) {
+      launch_params.print();
+    }
+
+    executor_utils::validateVectorizedTensors(
+        &fusion_, inputs, outputs, lowered_, expr_eval);
 
     if (outputs.empty() || outputs.size() != fusion_.outputs().size()) {
       allocated_outputs = allocOutputs(expr_eval);

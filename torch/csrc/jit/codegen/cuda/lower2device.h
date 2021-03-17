@@ -2,10 +2,11 @@
 
 #include <torch/csrc/WindowsTorchApiMacro.h>
 
+#include <torch/csrc/jit/codegen/cuda/compute_at_map.h>
 #include <torch/csrc/jit/codegen/cuda/ir_all_nodes.h>
 #include <torch/csrc/jit/codegen/cuda/kernel.h>
 #include <torch/csrc/jit/codegen/cuda/kernel_ir.h>
-#include <torch/csrc/jit/codegen/cuda/lower_compute_at_map.h>
+#include <torch/csrc/jit/codegen/cuda/lower_trivial_reductions.h>
 #include <torch/csrc/jit/codegen/cuda/root_domain_map.h>
 
 #include <memory>
@@ -50,6 +51,10 @@ class TORCH_CUDA_CU_API GpuLower {
     return ca_parallel_map_;
   }
 
+  const auto& trivialReductionInfo() const {
+    return trivial_reduction_info_;
+  }
+
  private:
   void lower();
 
@@ -73,6 +78,7 @@ class TORCH_CUDA_CU_API GpuLower {
   ComputeAtMap ca_loop_map_;
   ComputeAtMap ca_index_map_;
   ComputeAtMap ca_parallel_map_;
+  TrivialReductionInfo trivial_reduction_info_;
 
   Fusion* fusion_ = nullptr;
 };

@@ -1,11 +1,23 @@
 import torch
 import functools
 import warnings
+import collections
 try:
     import numpy as np
+    HAS_NUMPY = True
 except ModuleNotFoundError:
     np = None
-from torch._six import container_abcs, string_classes
+from torch._six import string_classes
+from typing import Any
+
+
+def autocast_decorator(autocast_instance, func):
+    @functools.wraps(func)
+    def decorate_autocast(*args, **kwargs):
+        with autocast_instance:
+            return func(*args, **kwargs)
+    decorate_autocast.__script_unsupported = '@autocast() decorator is not supported in script mode'
+    return decorate_autocast
 
 
 class autocast(object):
@@ -112,19 +124,27 @@ class autocast(object):
     Args:
         enabled(bool, optional, default=True):  Whether autocasting should be enabled in the region.
     """
-    def __init__(self, enabled=True):
-        if enabled and not torch.cuda.is_available():
+
+    def __init__(self, enabled: bool = True):
+        if torch._jit_internal.is_scripting():
+            self._enabled = enabled
+        elif enabled and not torch.cuda.is_available():
             warnings.warn("torch.cuda.amp.autocast only affects CUDA ops, but CUDA is not available.  Disabling.")
             self._enabled = False
         else:
             self._enabled = enabled
 
     def __enter__(self):
+        if torch._jit_internal.is_scripting():
+            return self
         self.prev = torch.is_autocast_enabled()
         torch.set_autocast_enabled(self._enabled)
         torch.autocast_increment_nesting()
+        return self
 
-    def __exit__(self, *args):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
+        if torch._jit_internal.is_scripting():
+            return
         # Drop the cache when we exit to a nesting level that's outside any instance of autocast.
         if torch.autocast_decrement_nesting() == 0:
             torch.clear_autocast_cache()
@@ -132,11 +152,10 @@ class autocast(object):
         return False
 
     def __call__(self, func):
-        @functools.wraps(func)
-        def decorate_autocast(*args, **kwargs):
-            with self:
-                return func(*args, **kwargs)
-        return decorate_autocast
+        if torch._jit_internal.is_scripting():
+            return func
+        else:
+            return autocast_decorator(self, func)
 
 
 # Casts Tensors and containers of Tensors.  Special-cases passthroughs for strings and np.ndarrays, which
@@ -147,11 +166,11 @@ def _cast(value, dtype):
         return value.to(dtype) if is_eligible else value
     elif isinstance(value, string_classes):
         return value
-    elif np is not None and isinstance(value, np.ndarray):
+    elif HAS_NUMPY and isinstance(value, np.ndarray):
         return value
-    elif isinstance(value, container_abcs.Mapping):
+    elif isinstance(value, collections.abc.Mapping):
         return {_cast(k, dtype): _cast(v, dtype) for k, v in value.items()}
-    elif isinstance(value, container_abcs.Iterable):
+    elif isinstance(value, collections.abc.Iterable):
         iterable = map(lambda v: _cast(v, dtype), value)
         if isinstance(value, list) or isinstance(value, tuple):
             return type(value)(iterable)

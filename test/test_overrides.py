@@ -3,6 +3,7 @@ import numpy as np
 import inspect
 import functools
 import pprint
+import pickle
 
 from torch.testing._internal.common_utils import TestCase, run_tests
 from torch.overrides import (
@@ -314,9 +315,16 @@ def generate_tensor_like_torch_implementations():
     torch_vars = vars(torch)
     untested_funcs = []
     testing_overrides = get_testing_overrides()
+    # test/test_cpp_api_parity.py monkeypatches torch.nn to have a new
+    # function sample_functional.  Depending on what order you run pytest
+    # collection, this may trigger the error here.  This is a hack to fix
+    # the problem.  A more proper fix is to make the "not tested" check
+    # a test on its own, and to make sure the monkeypatch is only installed
+    # for the span of the relevant test (and deleted afterwards)
+    testing_ignore = {"sample_functional"}
     for namespace, funcs in get_overridable_functions().items():
         for func in funcs:
-            if func not in testing_overrides:
+            if func not in testing_overrides and func.__name__ not in testing_ignore:
                 untested_funcs.append("{}.{}".format(namespace, func.__name__))
     msg = (
         "The following functions are not tested for __torch_function__ "
@@ -776,7 +784,7 @@ class TestEinsumOverride(TestCase):
 class TestGradCheckOverride(TestCase):
     "Test that wrappers work with gradcheck."
     def test_gradcheck(self):
-        from torch.autograd import gradcheck, gradgradcheck
+        from torch.testing._internal.common_utils import gradcheck, gradgradcheck
 
         a = wrap(torch.tensor(5.0, dtype=torch.double))
         b = wrap(torch.tensor(6.0, dtype=torch.double))
@@ -784,8 +792,8 @@ class TestGradCheckOverride(TestCase):
         a.requires_grad = True
         b.requires_grad = True
 
-        gradcheck(torch.add, (a, b), raise_exception=False)
-        gradgradcheck(torch.add, (a, b), raise_exception=False)
+        gradcheck(torch.add, (a, b), raise_exception=False, check_batched_grad=False)
+        gradgradcheck(torch.add, (a, b), raise_exception=False, check_batched_grad=False)
 
         total_used_attrs = a.used_attrs.union(b.used_attrs)
         total_used_calls = a.used_calls.union(b.used_calls)
@@ -839,6 +847,14 @@ class TestGradNewOnesOverride(TestCase):
         n = t.new_ones((1, 2))
         self.assertEqual(type(n), SubTensor2)
 
+class TestPickle(TestCase):
+    "Regression test for gh-47051"
+    def test_pickle(self):
+        t = torch.tensor([1]).as_subclass(SubTensor2)
+        t.abcd = "e"
+        t2 = pickle.loads(pickle.dumps(t))
+        self.assertIs(type(t2), SubTensor2)
+        self.assertEqual(t2.abcd, "e")
 
 class TestBroadcastAllOverride(TestCase):
     """ test for gh-37141 """

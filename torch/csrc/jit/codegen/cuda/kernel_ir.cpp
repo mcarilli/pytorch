@@ -26,9 +26,12 @@ Val::Val(Passkey passkey, DataType dtype) : Node(passkey), dtype_(dtype) {
   id_ = passkey.kernel->newValueId(passkey);
 }
 
-void Expr::setParentScope(Expr* scope) {
-  // TODO(kir): checks to make sure the scope lists are consistent
-  parent_scope_ = scope;
+Expr* Expr::parentScope() const {
+  if (scope()) {
+    return scope()->owner();
+  } else {
+    return nullptr;
+  }
 }
 
 NamedScalar* NamedScalar::getParallelDim(ParallelType p_type) {
@@ -255,6 +258,64 @@ ReductionOp::ReductionOp(
   addInput(in);
 }
 
+WelfordOp::WelfordOp(
+    Passkey passkey,
+    Val* out_var,
+    Val* out_avg,
+    Val* out_N,
+    Val* init_var,
+    Val* init_avg,
+    Val* init_N,
+    Val* in_var,
+    Val* in_avg,
+    Val* in_N)
+    : Expr(passkey),
+      out_var_(out_var),
+      out_avg_(out_avg),
+      out_N_(out_N),
+      init_var_(init_var),
+      init_avg_(init_avg),
+      init_N_(init_N),
+      in_var_(in_var),
+      in_avg_(in_avg),
+      in_N_(in_N) {
+  addOutput(out_avg);
+  addOutput(out_var);
+  addOutput(out_N);
+
+  if (!in_N->isOneInt()) {
+    addInput(in_var);
+  }
+  addInput(in_avg);
+  addInput(in_N);
+}
+
+std::vector<IterDomain*> WelfordOp::getReductionDomains() const {
+  // out is a TensorIndex after lowering
+  const auto out_val = out()->as<kir::TensorIndex>()->view();
+
+  auto vec_domain = out_val->as<TensorView>()->domain()->domain();
+
+  vec_domain.erase(
+      std::remove_if(
+          vec_domain.begin(),
+          vec_domain.end(),
+          [](IterDomain* id) { return !id->isReduction(); }),
+      vec_domain.end());
+  return vec_domain;
+}
+
+std::unordered_map<ParallelType, IterDomain*, TypeHash> WelfordOp::
+    getParallelReductionDomains() const {
+  std::unordered_map<ParallelType, IterDomain*, TypeHash> parallel_domains;
+  for (auto d : getReductionDomains()) {
+    if (d->isThread()) {
+      parallel_domains.insert(std::make_pair(d->parallelType(), d));
+    }
+  }
+  return parallel_domains;
+}
+
 std::vector<IterDomain*> ReductionOp::getReductionDomains() const {
   // out is a TensorIndex after lowering
   const auto out_val = out()->as<kir::TensorIndex>()->view();
@@ -307,6 +368,11 @@ TensorIndex::TensorIndex(
 Sync::Sync(Passkey passkey, bool war_sync)
     : Expr(passkey), war_sync_(war_sync) {}
 
+void Scope::insert(std::vector<Expr*>::const_iterator pos, Expr* expr) {
+  exprs_.insert(pos, expr);
+  expr->setScope(this);
+}
+
 void Scope::insert_before(Expr* ref, Expr* expr) {
   const auto it = std::find(exprs_.begin(), exprs_.end(), ref);
   TORCH_INTERNAL_ASSERT(
@@ -316,7 +382,7 @@ void Scope::insert_before(Expr* ref, Expr* expr) {
       " before the reference: ",
       ref,
       " however the reference was not found in this scope.");
-  exprs_.insert(it, expr);
+  insert(it, expr);
 }
 
 void Scope::insert_after(Expr* ref, Expr* expr) {
@@ -328,14 +394,35 @@ void Scope::insert_after(Expr* ref, Expr* expr) {
       " after the reference: ",
       ref,
       " however the reference was not found in this scope.");
-  exprs_.insert(it + 1, expr);
+  insert(it + 1, expr);
+}
+
+void Scope::insert(size_t pos, Expr* expr) {
+  const auto it = exprs_.begin() + pos;
+  insert(it, expr);
+}
+
+void Scope::erase(std::vector<Expr*>::const_iterator pos) {
+  // Remove the scope of the expr if this is the scope
+  auto expr = *pos;
+  TORCH_INTERNAL_ASSERT(
+      expr->scope() == this,
+      "Inconsistent scoping of expression detected: ",
+      kir::toString(expr));
+  expr->setScope(nullptr);
+  exprs_.erase(pos);
 }
 
 void Scope::erase(Expr* ref) {
   const auto it = std::find(exprs_.begin(), exprs_.end(), ref);
   if (it != exprs_.end()) {
-    exprs_.erase(it);
+    erase(it);
   }
+}
+
+void Scope::erase(size_t pos) {
+  TORCH_INTERNAL_ASSERT(pos < size());
+  erase(exprs_.begin() + pos);
 }
 
 bool Scope::contains(Expr* expr) const {
@@ -351,17 +438,19 @@ ForLoop::ForLoop(
     Passkey passkey,
     Val* index,
     IterDomain* iter_domain,
-    Expr* parent_scope)
-    : Expr(passkey), index_{index}, iter_domain_{iter_domain} {
+    bool unroll)
+    : Expr(passkey),
+      index_{index},
+      iter_domain_{iter_domain},
+      body_(this),
+      unroll_(unroll) {
   TORCH_INTERNAL_ASSERT(index->dtype() == DataType::Int);
-  setParentScope(parent_scope);
   addInput(index);
   addInput(iter_domain);
 }
 
-IfThenElse::IfThenElse(Passkey passkey, Bool* cond, Expr* parent_scope)
-    : Expr(passkey), cond_{cond} {
-  setParentScope(parent_scope);
+IfThenElse::IfThenElse(Passkey passkey, Bool* cond)
+    : Expr(passkey), cond_{cond}, then_body_(this), else_body_(this) {
   addInput(cond);
 }
 
@@ -425,6 +514,34 @@ std::string GridReduction::getPredicateFlagName(const TensorView* val) {
 
 // TODO(kir): remove this
 std::string GridReduction::getPredicateFlagName(
+    const fuser::cuda::TensorView* val) {
+  std::stringstream ss;
+  ss << "T" << val->name() << "_pred";
+  return ss.str();
+}
+
+GridWelford::GridWelford(
+    Passkey passkey,
+    WelfordOp* welford_op,
+    Allocate* var_buffer,
+    Allocate* avg_buffer,
+    Allocate* n_buffer,
+    Allocate* sync_buffer)
+    : Expr(passkey),
+      welford_op_(welford_op),
+      var_buffer_(var_buffer),
+      avg_buffer_(avg_buffer),
+      n_buffer_(n_buffer),
+      sync_buffer_(sync_buffer) {}
+
+std::string GridWelford::getPredicateFlagName(const TensorView* val) {
+  std::stringstream ss;
+  ss << "T" << val->name() << "_pred";
+  return ss.str();
+}
+
+// TODO(kir): remove this
+std::string GridWelford::getPredicateFlagName(
     const fuser::cuda::TensorView* val) {
   std::stringstream ss;
   ss << "T" << val->name() << "_pred";

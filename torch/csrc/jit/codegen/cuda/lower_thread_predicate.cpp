@@ -102,10 +102,11 @@ void maskSouceMap(
 ParallelTypeBitmap avoidRedundantWritesToSmem(
     const TensorView* out_tv,
     const ParallelTypeBitmap& pred) {
+  const auto& ca_map = GpuLower::current()->caParallelMap();
   auto new_pred = pred;
   if (out_tv->getMemoryType() == MemoryType::Shared) {
     for (size_t i = 0; i < out_tv->nDims(); i++) {
-      auto id = out_tv->getComputeAtAxis(i).first;
+      auto id = ca_map.getConcreteMappedID(out_tv->axis(i));
       if (out_tv->axis(i)->isBroadcast() && id->isThreadDim()) {
         new_pred.set(id->getParallelType(), true);
       }
@@ -137,6 +138,15 @@ void ThreadPredicateMap::updateBitSet(const Expr* expr) {
       continue;
 
     auto tv_inp = inp->as<TensorView>();
+
+    // Change for welford Op, we want the users of all outputs of welfordOp
+    //  to use a single predicate name.
+    if (auto tv_def = tv_inp->definition()) {
+      if (auto wop = dynamic_cast<WelfordOp*>(tv_def)) {
+        tv_inp = wop->out()->as<TensorView>();
+      }
+    }
+
     TORCH_INTERNAL_ASSERT(
         thread_predicates_.find(tv_inp) != thread_predicates_.end(),
         "Thread predicate map was not initialized, couldn't find ",

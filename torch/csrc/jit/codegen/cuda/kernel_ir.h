@@ -46,6 +46,7 @@ class UnaryOp;
 class BinaryOp;
 class TernaryOp;
 class ReductionOp;
+class WelfordOp;
 class BroadcastOp;
 
 // Statements
@@ -54,6 +55,10 @@ class Sync;
 class ForLoop;
 class IfThenElse;
 class GridReduction;
+class GridWelford;
+
+// Expr container
+class Scope;
 
 using ValueId = int32_t;
 
@@ -121,6 +126,9 @@ class TORCH_CUDA_CU_API IrVisitor : public PolymorphicBase {
   virtual void visit(const ReductionOp* node) {
     unhandled(node);
   }
+  virtual void visit(const WelfordOp* node) {
+    unhandled(node);
+  }
   virtual void visit(const BroadcastOp* node) {
     unhandled(node);
   }
@@ -139,6 +147,9 @@ class TORCH_CUDA_CU_API IrVisitor : public PolymorphicBase {
     unhandled(node);
   }
   virtual void visit(const GridReduction* node) {
+    unhandled(node);
+  }
+  virtual void visit(const GridWelford* node) {
     unhandled(node);
   }
 };
@@ -192,6 +203,10 @@ class TORCH_CUDA_CU_API MutableIrVisitor : public PolymorphicBase {
     unhandled(node);
   }
 
+  virtual void visit(WelfordOp* node) {
+    unhandled(node);
+  }
+
   // Statements
   virtual void visit(Allocate* node) {
     unhandled(node);
@@ -206,6 +221,10 @@ class TORCH_CUDA_CU_API MutableIrVisitor : public PolymorphicBase {
     unhandled(node);
   }
   virtual void visit(GridReduction* node) {
+    unhandled(node);
+  }
+
+  virtual void visit(GridWelford* node) {
     unhandled(node);
   }
 };
@@ -308,11 +327,16 @@ class TORCH_CUDA_CU_API Expr : public Node {
     return outputs_;
   }
 
-  Expr* parentScope() const {
-    return parent_scope_;
+  Scope* scope() const {
+    return scope_;
   }
 
-  void setParentScope(Expr* scope);
+  //! Set the current scope
+  void setScope(Scope* scope) {
+    scope_ = scope;
+  }
+
+  Expr* parentScope() const;
 
   Bool* predicate() const {
     return predicate_;
@@ -339,7 +363,7 @@ class TORCH_CUDA_CU_API Expr : public Node {
   std::vector<Val*> outputs_;
 
   // TODO(kir): revisit scope/nesting data structures
-  Expr* parent_scope_ = nullptr;
+  Scope* scope_ = nullptr;
 
   Bool* predicate_ = nullptr;
 };
@@ -876,6 +900,92 @@ class TORCH_CUDA_CU_API ReductionOp final : public Expr {
   Val* const in_ = nullptr;
 };
 
+class TORCH_CUDA_CU_API WelfordOp final : public Expr {
+ public:
+  WelfordOp(
+      Passkey passkey,
+      Val* out_var,
+      Val* out_avg,
+      Val* out_N,
+      Val* init_var,
+      Val* init_avg,
+      Val* init_N,
+      Val* in_var,
+      Val* in_avg,
+      Val* in_N);
+
+  void accept(IrVisitor* visitor) const override {
+    visitor->visit(this);
+  }
+
+  void accept(MutableIrVisitor* visitor) override {
+    visitor->visit(this);
+  }
+
+  Val* out() const {
+    return out_avg_;
+  }
+
+  Val* in() const {
+    return in_avg_;
+  }
+
+  // Welford Specific accessors
+  // Almost wanted to add a new struct for {var, avg, N}
+  Val* outVar() const {
+    return out_var_;
+  }
+
+  Val* outAvg() const {
+    return out_avg_;
+  }
+
+  Val* outN() const {
+    return out_N_;
+  }
+
+  Val* initVar() const {
+    return init_var_;
+  }
+
+  Val* initAvg() const {
+    return init_avg_;
+  }
+
+  Val* initN() const {
+    return init_N_;
+  }
+
+  Val* inVar() const {
+    return in_var_;
+  }
+
+  Val* inAvg() const {
+    return in_avg_;
+  }
+
+  Val* inN() const {
+    return in_N_;
+  }
+
+  std::unordered_map<ParallelType, IterDomain*, TypeHash>
+  getParallelReductionDomains() const;
+
+ private:
+  std::vector<IterDomain*> getReductionDomains() const;
+
+ private:
+  Val* const out_var_;
+  Val* const out_avg_;
+  Val* const out_N_;
+  Val* const init_var_;
+  Val* const init_avg_;
+  Val* const init_N_;
+  Val* const in_var_;
+  Val* const in_avg_;
+  Val* const in_N_;
+};
+
 class TORCH_CUDA_CU_API TensorIndex final : public Val {
  public:
   TensorIndex(
@@ -1025,22 +1135,10 @@ class TORCH_CUDA_CU_API Sync final : public Expr {
 // TODO(kir): promote to IR node
 class TORCH_CUDA_CU_API Scope {
  public:
-  Scope() = default;
+  explicit Scope(Expr* owner) : owner_(owner) {}
 
   const std::vector<Expr*>& exprs() const {
     return exprs_;
-  }
-
-  void push_back(Expr* e) {
-    exprs_.push_back(e);
-  }
-
-  void insert(size_t pos, Expr* expr) {
-    exprs_.insert(exprs_.begin() + pos, expr);
-  }
-
-  void erase(size_t pos) {
-    exprs_.erase(exprs_.begin() + pos);
   }
 
   bool empty() const {
@@ -1059,20 +1157,46 @@ class TORCH_CUDA_CU_API Scope {
     return exprs_[i];
   }
 
+  // Insert expr before expression at pos
+  void insert(size_t pos, Expr* expr);
+
   // Insert expr before ref
   void insert_before(Expr* ref, Expr* expr);
 
   // Insert expr after ref
   void insert_after(Expr* ref, Expr* expr);
 
-  bool contains(Expr* expr) const;
+  void push_back(Expr* e) {
+    exprs_.push_back(e);
+    e->setScope(this);
+  }
 
+  // Erase expr at pos
+  void erase(size_t pos);
+
+  // Erase expr ref
   void erase(Expr* ref);
+
+  bool contains(Expr* expr) const;
 
   void clear();
 
+  Expr* owner() const {
+    return owner_;
+  }
+
+ private:
+  // Insert expr before pos
+  void insert(std::vector<Expr*>::const_iterator pos, Expr* expr);
+
+  // Erase expr at pos
+  void erase(std::vector<Expr*>::const_iterator pos);
+
  private:
   std::vector<Expr*> exprs_;
+
+  //! Owner exprssion of this scope, e.g., IfThenElse
+  Expr* owner_ = nullptr;
 };
 
 //! ForLoop provides scoping around an int iterator from 0 to range. Exprs
@@ -1088,7 +1212,7 @@ class TORCH_CUDA_CU_API ForLoop final : public Expr {
       Passkey passkey,
       Val* index,
       IterDomain* iter_domain,
-      Expr* parent_scope);
+      bool unroll = false);
 
   void accept(IrVisitor* visitor) const override {
     visitor->visit(this);
@@ -1114,10 +1238,15 @@ class TORCH_CUDA_CU_API ForLoop final : public Expr {
     return body_;
   }
 
+  bool unroll() const {
+    return unroll_;
+  }
+
  private:
   Val* const index_ = nullptr;
   IterDomain* const iter_domain_;
   Scope body_;
+  bool unroll_ = false;
 };
 
 //! IfThenElse provides scoping for an boolean operator. Exprs placed in its
@@ -1129,7 +1258,7 @@ class TORCH_CUDA_CU_API ForLoop final : public Expr {
 //!
 class TORCH_CUDA_CU_API IfThenElse final : public Expr {
  public:
-  explicit IfThenElse(Passkey passkey, Bool* cond, Expr* parent_scope);
+  explicit IfThenElse(Passkey passkey, Bool* cond);
 
   void accept(IrVisitor* visitor) const override {
     visitor->visit(this);
@@ -1219,6 +1348,74 @@ class TORCH_CUDA_CU_API GridReduction final : public Expr {
  private:
   ReductionOp* reduction_op_ = nullptr;
   Allocate* reduction_buffer_ = nullptr;
+  Allocate* sync_buffer_ = nullptr;
+  // gridReduce has template flags for thread predicates. In order to
+  // use them, the thread predicate is held here separately from
+  // Expr::predicate_.
+  ParallelTypeBitmap thread_predicate_;
+};
+
+//! Grid welford operation
+//!
+//! This node is used only after lowering a fusion to explicitly mark a grid
+//! reduction and the buffer allocation needed to do it.
+//!
+//! This node provides FusionExecutor the information it needs to allocate the
+//! reduction and sync buffers.
+class TORCH_CUDA_CU_API GridWelford final : public Expr {
+ public:
+  void accept(IrVisitor* visitor) const override {
+    visitor->visit(this);
+  }
+
+  void accept(MutableIrVisitor* visitor) override {
+    visitor->visit(this);
+  }
+
+  GridWelford(
+      Passkey passkey,
+      WelfordOp* welford_op,
+      Allocate* var_buffer,
+      Allocate* avg_buffer,
+      Allocate* n_buffer,
+      Allocate* sync_buffer);
+
+  WelfordOp* welford_op() const {
+    return welford_op_;
+  }
+
+  Allocate* var_buffer() const {
+    return var_buffer_;
+  }
+
+  Allocate* avg_buffer() const {
+    return avg_buffer_;
+  }
+
+  Allocate* N_buffer() const {
+    return n_buffer_;
+  }
+
+  Allocate* sync_buffer() const {
+    return sync_buffer_;
+  }
+
+  const ParallelTypeBitmap& threadPredicate() const {
+    return thread_predicate_;
+  }
+
+  void setThreadPredicate(const ParallelTypeBitmap& thread_predicate) {
+    thread_predicate_ = thread_predicate;
+  }
+
+  static std::string getPredicateFlagName(const TensorView* val);
+  static std::string getPredicateFlagName(const fuser::cuda::TensorView* val);
+
+ private:
+  WelfordOp* welford_op_ = nullptr;
+  Allocate* var_buffer_ = nullptr;
+  Allocate* avg_buffer_ = nullptr;
+  Allocate* n_buffer_ = nullptr;
   Allocate* sync_buffer_ = nullptr;
   // gridReduce has template flags for thread predicates. In order to
   // use them, the thread predicate is held here separately from

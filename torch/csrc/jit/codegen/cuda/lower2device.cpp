@@ -11,6 +11,7 @@
 #include <torch/csrc/jit/codegen/cuda/lower_insert_syncs.h>
 #include <torch/csrc/jit/codegen/cuda/lower_loops.h>
 #include <torch/csrc/jit/codegen/cuda/lower_thread_predicate.h>
+#include <torch/csrc/jit/codegen/cuda/lower_trivial_reductions.h>
 #include <torch/csrc/jit/codegen/cuda/lower_unroll.h>
 #include <torch/csrc/jit/codegen/cuda/lower_utils.h>
 #include <torch/csrc/jit/codegen/cuda/lower_validation.h>
@@ -70,7 +71,10 @@ void GpuLower::replaceSymbolicSizes() {
 
       // TODO(kir): consider a different implementation which doesn't
       //  hijack the kir_val_map_
-      if (kir_val_map_.find(orig_size) == kir_val_map_.end()) {
+      // Currently turn off this part for inputs of segmented fusion,
+      //  since FusionSegmentRuntime will provide these as integer inputs
+      if (kir_val_map_.find(orig_size) == kir_val_map_.end() &&
+          !orig_size->isFusionInput()) {
         std::stringstream ss;
         ss << "T" << tv->name() << ".size[" << dim++ << "]";
         kir_val_map_[orig_size] = ir_builder.create<kir::NamedScalar>(
@@ -105,9 +109,7 @@ void GpuLower::lower() {
   // prepare for lowering
   validateIr(fusion_);
   replaceSymbolicSizes();
-
-  // Compute thread predicates
-  ThreadPredicateMap preds(fusion_);
+  trivial_reduction_info_.build(fusion_, this);
 
   // In the future we may directly use this map, but for now it will propagate
   // and validate (to some extent) the parallelization strategy.
@@ -115,15 +117,23 @@ void GpuLower::lower() {
   // propagate the parallel strategy in some instances, we need to do it before
   // lowering.
   ca_parallel_map_ = ComputeAtMap(ComputeAtMap::MappingMode::PARALLEL);
-  ca_parallel_map_.build();
+  ca_parallel_map_.build(fusion_, current());
+
+  // Want to run this after parallel map is created
+  validateVectorize(fusion_);
 
   // Generate mappings to generate indices
   ca_index_map_ = ComputeAtMap(ComputeAtMap::MappingMode::INDEX);
-  ca_index_map_.build();
+  ca_index_map_.build(fusion_, current());
 
   // Generate mappings to generate and map to loop nests
   ca_loop_map_ = ComputeAtMap(ComputeAtMap::MappingMode::LOOP);
-  ca_loop_map_.build();
+  ca_loop_map_.build(fusion_, current());
+
+  validateParallelize(fusion_);
+
+  // Compute thread predicates
+  ThreadPredicateMap preds(fusion_);
 
   // Set the kernel inputs & outputs
   for (auto input : fusion_->inputs()) {
@@ -291,9 +301,19 @@ class GpuLower::KernelIrMapper : private OptInConstDispatch {
   }
 
   void handle(const ReductionOp* node) final {
+    auto out_tv = node->out()->as<TensorView>();
     // If trivial reduction operation lower to set operation.
-    if (!node->out()->as<TensorView>()->hasReduction() &&
-        node->out()->as<TensorView>()->hasAnyReduction()) {
+    if (std::all_of(
+            out_tv->domain()->domain().begin(),
+            out_tv->domain()->domain().end(),
+            [&](IterDomain* id) {
+              // If id is a reduction axis, is it a trivial reduction?
+              if (id->isReduction()) {
+                return gpu_lower_->trivialReductionInfo().isDerived(id);
+              } else {
+                return true;
+              }
+            })) {
       const auto lowered_node = ir_builder_.create<kir::UnaryOp>(
           UnaryOpType::Set, lowerValue(node->out()), lowerValue(node->in()));
       TORCH_CHECK(
@@ -306,6 +326,22 @@ class GpuLower::KernelIrMapper : private OptInConstDispatch {
         lowerValue(node->init()),
         lowerValue(node->out()),
         lowerValue(node->in()));
+    TORCH_CHECK(gpu_lower_->kir_expr_map_.insert({node, lowered_node}).second);
+  }
+
+  void handle(const WelfordOp* node) final {
+    auto lowerOptional = [&](Val* v) { return v ? lowerValue(v) : nullptr; };
+    const auto lowered_node = ir_builder_.create<kir::WelfordOp>(
+        lowerValue(node->outVar()),
+        lowerValue(node->outAvg()),
+        lowerValue(node->outN()),
+        lowerValue(node->initVar()),
+        lowerValue(node->initAvg()),
+        lowerValue(node->initN()),
+        lowerOptional(node->inVar()),
+        lowerValue(node->inAvg()),
+        lowerValue(node->inN()));
+
     TORCH_CHECK(gpu_lower_->kir_expr_map_.insert({node, lowered_node}).second);
   }
 
@@ -337,7 +373,6 @@ kir::Expr* GpuLower::lowerExpr(const Expr* expr) {
 }
 
 GpuLower* GpuLower::current() {
-  TORCH_INTERNAL_ASSERT(active_gpu_lower != nullptr);
   return active_gpu_lower;
 }
 

@@ -241,30 +241,38 @@ void IndexCompute::handle(Split* split) {
   const bool outer_bcast = outer_id->isBroadcast();
   const bool inner_bcast = inner_id->isBroadcast();
 
-  // Zero inds because a dim is bcast is part of normal traversal, if it's not
-  // bcast but is zero ind then it's from local or smem. In the latter case we
-  // want to propagate this property.
-  if ((outer_zero && !outer_bcast) || (inner_zero && !inner_bcast) ||
-      hasZeroMerged(inner_id) || hasZeroMerged(outer_id)) {
-    zero_merged_in_.emplace(in_id);
-  } else {
-    // Maybe clear in_id as it could have been mapped over from another
-    // IndexCompute. Uncertain if this is needed but seems to be safe.
-    if (hasZeroMerged(in_id)) {
-      zero_merged_in_.erase(in_id);
-    }
-  }
+  const bool outer_vect =
+      split->outer()->getParallelType() == ParallelType::Vectorize;
+  const bool inner_vect =
+      split->inner()->getParallelType() == ParallelType::Vectorize;
 
-  if (outer_zero && inner_zero) {
+  // We want to mark as zero merged in if we're working with shared or local
+  // memory, and the dimension we're working with is not part of the allocation,
+  // as we have special propagation rules for that scenario. If zero indexing is
+  // from a vectorized ID or broadcast do not propagate in zero merged manner,
+  // so don't mark. This logic is important for vector support on global memory.
+
+  // Maybe clear in_id as it could have been mapped over from another
+  // IndexCompute. Uncertain if this is needed but seems to be safe.
+  bool zero_merged_in = hasZeroMerged(in_id);
+  zero_merged_in =
+      zero_merged_in || hasZeroMerged(inner_id) || hasZeroMerged(outer_id);
+  zero_merged_in =
+      zero_merged_in || (outer_zero && (!outer_bcast && !outer_vect));
+  zero_merged_in =
+      zero_merged_in || (inner_zero && (!inner_bcast && !inner_vect));
+
+  if (zero_merged_in) {
+    zero_merged_in_.emplace(in_id);
+  }
+  if (zero_merged_in && outer_zero && inner_zero) {
     index_map_[in_id] = ir_builder.create<kir::Int>(0);
     extent_map_[in_id] = ir_builder.create<kir::Int>(0);
-  } else if (outer_zero) {
+  } else if (zero_merged_in && outer_zero) {
     index_map_[in_id] = inner_ind;
-    zero_merged_in_.emplace(in_id);
     extent_map_[in_id] = getExtent(inner_id);
-  } else if (inner_zero) {
+  } else if (zero_merged_in && inner_zero) {
     index_map_[in_id] = outer_ind;
-    zero_merged_in_.emplace(in_id);
     extent_map_[in_id] = getExtent(outer_id);
   } else {
     index_map_[in_id] = ir_builder.addExpr(
@@ -753,7 +761,8 @@ kir::TensorIndex* Index::getGlobalProducerIndex(
     }
   }
 
-  // Index into the reference tensor
+  // Index into the reference tensor. Reference indexing will handle vectorized
+  // dims where index should be set to 0
   auto ref_compute = getReferenceIndexing(loops, reference_domain);
 
   // Replay producer as reference to get reference to producer ID map
@@ -765,6 +774,15 @@ kir::TensorIndex* Index::getGlobalProducerIndex(
 
   const auto& ref_2_producer = replay_producer_as_ref.getReplay();
 
+  // Forward vectorized IDs to index into producer correctly
+  for (auto entry : ref_2_producer) {
+    auto ref_id = entry.first;
+    auto p_id = entry.second;
+    if (ref_id->getParallelType() == ParallelType::Vectorize) {
+      p_id->parallelize(ParallelType::Vectorize);
+    }
+  }
+
   // Index into producer using reference indexing
   auto producer_indexing = ref_compute.updateIndexCompute(
       producer_tv->domain(),
@@ -775,9 +793,44 @@ kir::TensorIndex* Index::getGlobalProducerIndex(
   // and use them.
   auto root_dom = producer_tv->getMaybeRFactorDomain();
 
-  bool inner_most_dim_contig =
-      root_dom[root_dom.size() - 1]->getIterType() == IterType::Iteration &&
-      producer_tv->domain()->contiguity()[root_dom.size() - 1];
+  // TODO: Abstract stride logic to reuse with consumer indexing
+  std::vector<kir::Val*> strides(root_dom.size(), nullptr);
+  {
+    auto zero = ir_builder.create<kir::Int>(0);
+    int stride_i = 0;
+    for (size_t i = 0; i < root_dom.size(); i++) {
+      if (root_dom[i]->isReduction() ||
+          root_dom[i]->getIterType() == IterType::BroadcastWithoutStride) {
+        strides[i] = zero;
+        continue;
+      } else if (root_dom[i]->getIterType() == IterType::BroadcastWithStride) {
+        strides[i] = zero;
+        stride_i++;
+        continue;
+      }
+      std::stringstream ss;
+      ss << "T" << producer_tv->name() << ".stride[" << stride_i++ << "]";
+      strides[i] = ir_builder.create<kir::NamedScalar>(ss.str(), DataType::Int);
+    }
+  }
+
+  kir::Val* cur_stride = ir_builder.create<kir::Int>(1);
+  for (size_t i = 0; i < root_dom.size(); i++) {
+    auto dim = root_dom.size() - i - 1;
+    if (root_dom[dim]->isReduction()) {
+      continue;
+    }
+    if (root_dom[dim]->isBroadcast()) {
+      continue;
+    }
+    if (producer_tv->domain()->contiguity()[dim]) {
+      strides[dim] = cur_stride;
+      cur_stride = ir_builder.mulExpr(
+          cur_stride, gpu_lower->lowerValue(root_dom[dim]->extent()));
+    } else {
+      cur_stride = strides[dim];
+    }
+  }
 
   // Global striding
   int64_t stride_i = 0;
@@ -786,7 +839,12 @@ kir::TensorIndex* Index::getGlobalProducerIndex(
     if (root_dom[i]->isReduction() ||
         root_dom[i]->getIterType() == IterType::BroadcastWithoutStride) {
       continue;
-    } else if (root_dom[i]->getIterType() == IterType::BroadcastWithStride) {
+      // If the domain is derived from a trivial reduction, no indexing to
+      // create. Also, the domain at this branch must not be a
+      // reduction, so the stride index should be incremented.
+    } else if (
+        root_dom[i]->getIterType() == IterType::BroadcastWithStride ||
+        gpu_lower->trivialReductionInfo().isDerived(root_dom[i])) {
       stride_i++;
       continue;
     }
@@ -805,16 +863,10 @@ kir::TensorIndex* Index::getGlobalProducerIndex(
         kir::toString(kir_root_dom_i));
 
     auto root_ind = producer_indexing.indexMap().at(kir_root_dom_i);
-    if (i == root_dom.size() - 1 && inner_most_dim_contig) {
-      strided_inds.push_back(root_ind);
-    } else if (root_ind->isZeroInt()) {
-      stride_i++;
+    if (root_ind->isZeroInt()) {
+      continue;
     } else {
-      std::stringstream ss;
-      ss << "T" << producer_tv->name() << ".stride[" << stride_i++ << "]";
-      strided_inds.push_back(ir_builder.mulExpr(
-          root_ind,
-          ir_builder.create<kir::NamedScalar>(ss.str(), DataType::Int)));
+      strided_inds.push_back(ir_builder.mulExpr(root_ind, strides[i]));
     }
   }
 
@@ -861,7 +913,8 @@ std::unordered_map<kir::ForLoop*, kir::Val*> indexMapFromTV(
       }
     } else if (
         (loop->iter_domain()->isBlockDim() && is_shared) ||
-        (loop->iter_domain()->isThread() && is_local)) {
+        (loop->iter_domain()->isThread() && is_local) ||
+        (loop->iter_domain()->parallelType() == ParallelType::Vectorize)) {
       idx = zero;
     } else {
       idx = loop->index();
@@ -992,6 +1045,15 @@ kir::TensorIndex* Index::getProducerIndex_impl(
 
   const auto& ref_2_producer = replay_producer_as_ref.getReplay();
 
+  // Forward vectorized IDs to index into producer correctly
+  for (auto entry : ref_2_producer) {
+    auto ref_id = entry.first;
+    auto p_id = entry.second;
+    if (ref_id->getParallelType() == ParallelType::Vectorize) {
+      p_id->parallelize(ParallelType::Vectorize);
+    }
+  }
+
   // Index into producer using reference indexing
   auto producer_indexing = ref_compute.updateIndexCompute(
       producer_tv->domain(),
@@ -1014,7 +1076,8 @@ kir::TensorIndex* Index::getProducerIndex_impl(
   auto root_dom = producer_tv->getMaybeRFactorDomain();
   std::vector<kir::Val*> strided_inds;
   for (size_t i = 0; i < root_dom.size(); i++) {
-    if (root_dom[i]->isReduction() || root_dom[i]->isBroadcast()) {
+    if (root_dom[i]->isReduction() || root_dom[i]->isBroadcast() ||
+        gpu_lower->trivialReductionInfo().isDerived(root_dom[i])) {
       continue;
     }
 
@@ -1039,7 +1102,8 @@ kir::TensorIndex* Index::getProducerIndex_impl(
     // Compute striding for this index.
     kir::Val* stride = nullptr;
     for (size_t j = i + 1; j < root_dom.size(); j++) {
-      if (root_dom[j]->isBroadcast() || root_dom[j]->isReduction()) {
+      if (root_dom[j]->isBroadcast() || root_dom[j]->isReduction() ||
+          gpu_lower->trivialReductionInfo().isDerived(root_dom[j])) {
         continue;
       }
 
@@ -1112,7 +1176,8 @@ kir::TensorIndex* Index::getGlobalConsumerIndex(
 
   const auto& ref_2_consumer = replay_consumer_as_ref.getReplay();
 
-  // Index into the reference tensor
+  // Index into the reference tensor. Reference indexing will handle vectorized
+  // dims where index should be set to 0
   auto ref_compute = getReferenceIndexing(loops, reference_domain);
 
   // Index into consumer using reference indexing
@@ -1125,9 +1190,44 @@ kir::TensorIndex* Index::getGlobalConsumerIndex(
   // and use them.
   auto root_dom = consumer_tv->getMaybeRFactorDomain();
 
-  bool inner_most_dim_contig =
-      root_dom[root_dom.size() - 1]->getIterType() == IterType::Iteration &&
-      consumer_tv->domain()->contiguity()[root_dom.size() - 1];
+  // TODO: Abstract stride logic to reuse with producer indexing
+  std::vector<kir::Val*> strides(root_dom.size(), nullptr);
+  {
+    auto zero = ir_builder.create<kir::Int>(0);
+    int stride_i = 0;
+    for (size_t i = 0; i < root_dom.size(); i++) {
+      if (root_dom[i]->isReduction() ||
+          root_dom[i]->getIterType() == IterType::BroadcastWithoutStride) {
+        strides[i] = zero;
+        continue;
+      } else if (root_dom[i]->getIterType() == IterType::BroadcastWithStride) {
+        strides[i] = zero;
+        stride_i++;
+        continue;
+      }
+      std::stringstream ss;
+      ss << "T" << consumer_tv->name() << ".stride[" << stride_i++ << "]";
+      strides[i] = ir_builder.create<kir::NamedScalar>(ss.str(), DataType::Int);
+    }
+  }
+
+  kir::Val* cur_stride = ir_builder.create<kir::Int>(1);
+  for (size_t i = 0; i < root_dom.size(); i++) {
+    auto dim = root_dom.size() - i - 1;
+    if (root_dom[dim]->isReduction()) {
+      continue;
+    }
+    if (root_dom[dim]->isBroadcast()) {
+      continue;
+    }
+    if (consumer_tv->domain()->contiguity()[dim]) {
+      strides[dim] = cur_stride;
+      cur_stride = ir_builder.mulExpr(
+          cur_stride, gpu_lower->lowerValue(root_dom[dim]->extent()));
+    } else {
+      cur_stride = strides[dim];
+    }
+  }
 
   int64_t stride_i = 0;
   std::vector<kir::Val*> strided_inds;
@@ -1135,7 +1235,10 @@ kir::TensorIndex* Index::getGlobalConsumerIndex(
     if (root_dom[i]->isReduction() ||
         root_dom[i]->getIterType() == IterType::BroadcastWithoutStride) {
       continue;
-    } else if (root_dom[i]->getIterType() == IterType::BroadcastWithStride) {
+      // See a comment in indexing to root domains in getGlobalProducerIndex.
+    } else if (
+        root_dom[i]->getIterType() == IterType::BroadcastWithStride ||
+        gpu_lower->trivialReductionInfo().isDerived(root_dom[i])) {
       stride_i++;
       continue;
     }
@@ -1152,17 +1255,13 @@ kir::TensorIndex* Index::getGlobalConsumerIndex(
         i,
         " id: ",
         kir::toString(kir_root_dom_i));
-    auto ind = consumer_indexing.indexMap().at(kir_root_dom_i);
 
-    if (i == root_dom.size() - 1 && inner_most_dim_contig) {
-      strided_inds.push_back(ind);
-    } else if (ind->isZeroInt()) {
-      stride_i++;
+    auto root_ind = consumer_indexing.indexMap().at(kir_root_dom_i);
+
+    if (root_ind->isZeroInt()) {
+      continue;
     } else {
-      std::stringstream ss;
-      ss << "T" << consumer_tv->name() << ".stride[" << stride_i++ << "]";
-      strided_inds.push_back(ir_builder.mulExpr(
-          ind, ir_builder.create<kir::NamedScalar>(ss.str(), DataType::Int)));
+      strided_inds.push_back(ir_builder.mulExpr(root_ind, strides[i]));
     }
   }
 
@@ -1260,7 +1359,8 @@ kir::TensorIndex* Index::getConsumerIndex_impl(
   auto root_dom = consumer_tv->getMaybeRFactorDomain();
   std::vector<kir::Val*> strided_inds;
   for (size_t i = 0; i < root_dom.size(); i++) {
-    if (root_dom[i]->isReduction() || root_dom[i]->isBroadcast()) {
+    if (root_dom[i]->isReduction() || root_dom[i]->isBroadcast() ||
+        gpu_lower->trivialReductionInfo().isDerived(root_dom[i])) {
       continue;
     }
 
@@ -1284,7 +1384,8 @@ kir::TensorIndex* Index::getConsumerIndex_impl(
     // Compute striding for this index.
     kir::Val* stride = nullptr;
     for (size_t j = i + 1; j < root_dom.size(); j++) {
-      if (root_dom[j]->isBroadcast() || root_dom[j]->isReduction()) {
+      if (root_dom[j]->isBroadcast() || root_dom[j]->isReduction() ||
+          gpu_lower->trivialReductionInfo().isDerived(root_dom[j])) {
         continue;
       }
 
@@ -1419,7 +1520,8 @@ std::pair<std::vector<kir::Val*>, bool> Index::getConsumerRootPredIndices(
     const auto one = ir_builder.create<kir::Int>(1);
     for (auto loop : loops) {
       if (loop->iter_domain()->parallelType() == ParallelType::Unroll ||
-          loop->iter_domain()->parallelType() == ParallelType::Unswitch) {
+          loop->iter_domain()->parallelType() == ParallelType::Unswitch ||
+          loop->iter_domain()->parallelType() == ParallelType::Vectorize) {
         within_unswitch = true;
       }
 
@@ -1451,26 +1553,28 @@ std::pair<std::vector<kir::Val*>, bool> Index::getConsumerRootPredIndices(
   // Indices should now be mapped onto IterDomains in consumer, so just grab
   // and use them.
 
-  // If we are generating a predicate for initialization check if we should use
-  // rfactor instead of root_dom
-  bool use_rfactor = true;
-  if (kir_consumer_tv->domain()->hasRFactor()) {
-    auto rfactor_dom = kir_consumer_tv->domain()->rfactorDomain();
-    for (auto rfactor_id : rfactor_dom) {
-      if (rfactor_id->isReduction()) {
-        if (consumer_indexing.indexMap().find(rfactor_id) !=
-            consumer_indexing.indexMap().end()) {
-          if (!consumer_indexing.indexMap().at(rfactor_id)->isZeroInt()) {
-            use_rfactor = false;
-            break;
-          }
+  // If we are generating a predicate for initialization, we should use
+  // rfactor instead of root_dom. If we are generating a predicate for
+  // actual reduction expr, reduction axes should have their indices
+  // mapped to non-zero symbolic vals.
+  bool buffer_init = false;
+  for (auto consumer_id : kir_consumer_tv->domain()->domain()) {
+    if (consumer_id->isReduction()) {
+      if (consumer_indexing.indexMap().find(consumer_id) !=
+          consumer_indexing.indexMap().end()) {
+        if (!consumer_indexing.indexMap().at(consumer_id)->isZeroInt()) {
+          buffer_init = false;
+          break;
         }
       }
+      buffer_init = true;
     }
   }
 
+  // If we are initializing a reduction buffer and the tensor has a
+  // rfactor root, the predicate should be based on the rfactor root.
   const auto root_domain =
-      (use_rfactor && kir_consumer_tv->domain()->hasRFactor())
+      (buffer_init && kir_consumer_tv->domain()->hasRFactor())
       ? kir_consumer_tv->domain()->rfactorDomain()
       : kir_consumer_tv->domain()->rootDomain();
 
@@ -1478,7 +1582,8 @@ std::pair<std::vector<kir::Val*>, bool> Index::getConsumerRootPredIndices(
   std::vector<kir::Val*> root_inds(root_domain.size(), zero);
 
   for (size_t i = 0; i < root_domain.size(); i++) {
-    if (root_domain[i]->isBroadcast()) {
+    if (root_domain[i]->isBroadcast() ||
+        gpu_lower->trivialReductionInfo().isDerived(root_domain[i])) {
       continue;
     }
     const auto it = consumer_indexing.indexMap().find(root_domain[i]);
@@ -1487,7 +1592,7 @@ std::pair<std::vector<kir::Val*>, bool> Index::getConsumerRootPredIndices(
     }
   }
 
-  return {root_inds, use_rfactor};
+  return {root_inds, buffer_init};
 }
 
 } // namespace cuda

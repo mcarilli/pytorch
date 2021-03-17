@@ -47,6 +47,10 @@ namespace cuda {
 
 class Fusion;
 class TensorView;
+class WelfordResult;
+
+class SegmentCandidateFinder;
+class SegmentedFusion;
 
 //! Fusion Guard is our "context manager". It holds the actrive fusion and
 //! allows it to be accessed anywhere through FusionGuard::getCurFusion()
@@ -82,7 +86,7 @@ class TORCH_CUDA_CU_API Fusion final {
 
   ~Fusion();
 
-  friend void swap(Fusion& a, Fusion& b) noexcept;
+  TORCH_CUDA_CU_API friend void swap(Fusion& a, Fusion& b) noexcept;
 
   void clear() noexcept;
 
@@ -102,6 +106,10 @@ class TORCH_CUDA_CU_API Fusion final {
   // TODO: Rename to register
   void addOutput(Val* output);
 
+  //! Register output as an output of the fusion
+  // TODO: Rename to register
+  void addOutput(WelfordResult& output);
+
   //! Deregister input as an input of the fusion
   // TODO: Rename to register
   void removeInput(Val* input);
@@ -112,6 +120,9 @@ class TORCH_CUDA_CU_API Fusion final {
 
   //! Replace output with another value
   void replaceOutput(Val* output, Val* replacement);
+
+  //! Lookup the value node with the specified type and name
+  Val* lookupValue(ValType vtype, StmtNameType name) const;
 
   //! Clear Expr's from TV uses that are not required to produce outputs from
   //! inputs
@@ -163,7 +174,9 @@ class TORCH_CUDA_CU_API Fusion final {
   //! Return in insertion order
   const std::deque<Val*>& deterministic_vals() const noexcept;
 
-  //! Return the set of Exprs registered with this fusion
+  //! Return the set of Exprs registered with this fusion. Warning: This will
+  //! return exprs outside inputs/outputs, so can be unsafe for use with
+  //! segmented fusions.
   const std::unordered_set<Expr*>& unordered_exprs() const noexcept;
 
   //! Return all Exprs that use val
@@ -178,6 +191,9 @@ class TORCH_CUDA_CU_API Fusion final {
   //! Indicate that the fusion contains reduction operations
   bool hasReduction();
 
+  //! Run fusion segmentation algorithm to create a segmented fusion
+  std::unique_ptr<SegmentedFusion> segment();
+
   const auto& inputs() const {
     return inputs_;
   }
@@ -191,6 +207,12 @@ class TORCH_CUDA_CU_API Fusion final {
   bool hasInput(const Val* val) const;
   bool hasOutput(const Val* val) const;
 
+ protected:
+  friend SegmentCandidateFinder;
+  friend SegmentedFusion;
+
+  static IrCloner copy(const Fusion* from, Fusion* to);
+
  private:
   // Return an int that monotonically increases for each val/expr, some are
   // explicitly incremented by type.
@@ -203,6 +225,10 @@ class TORCH_CUDA_CU_API Fusion final {
   std::unordered_set<Val*> val_set_;
   std::deque<Val*> val_deque_;
   std::unordered_set<Expr*> expr_set_;
+
+  // name-to-node lookup indexes
+  std::unordered_map<ValType, std::unordered_map<StmtNameType, Val*>>
+      lookup_index_;
 
   // Values names counters
   std::unordered_map<ValType, StmtNameType, TypeHash> val_type_name_map_;

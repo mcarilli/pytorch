@@ -13,7 +13,7 @@ namespace fuser {
 namespace cuda {
 
 //! Generic interface for mapping root domains of a producer-consumer pair.
-class TORCH_CUDA_API RootDomainMap : public PolymorphicBase {
+class TORCH_CUDA_CU_API RootDomainMap : public PolymorphicBase {
  public:
   //! Return a map from a producer TensorDomain to a consumer
   //! TensorDomain
@@ -76,7 +76,7 @@ class TORCH_CUDA_API RootDomainMap : public PolymorphicBase {
 //! i.e., unable to compute the same tensors multiple times. This
 //! should not be used for transformations implementing computeAt, but
 //! should be valid otherwise.
-class TORCH_CUDA_API PairwiseRootDomainMap : public RootDomainMap {
+class TORCH_CUDA_CU_API PairwiseRootDomainMap : public RootDomainMap {
  public:
   //! \param producer The producer tensor of a producer-consumer pair.
   //! \param consumer The consumer tensor of a producer-consumer pair.
@@ -169,7 +169,7 @@ class ComputeAtRootDomainMap;
 //! reduction outputs. Such consumer IterDomains may not be mapped to
 //! the producer reduction domain since the corresponding reduction
 //! loop must be closed before any of the consumers can appear.
-class TORCH_CUDA_API UnmappableReductionDomains : private IterVisitor {
+class TORCH_CUDA_CU_API UnmappableReductionDomains : private IterVisitor {
  public:
   UnmappableReductionDomains();
   virtual ~UnmappableReductionDomains() = default;
@@ -199,14 +199,21 @@ class TORCH_CUDA_API UnmappableReductionDomains : private IterVisitor {
 //! example:
 //!    T2 [i0,i1] = T1[i2,i3] + T0[i4,i5]
 //! This will create mappings between i0, i2 and i4.
-class TORCH_CUDA_API ComputeAtRootDomainMap : public RootDomainMap {
+class TORCH_CUDA_CU_API ComputeAtRootDomainMap : public RootDomainMap {
   friend class ComputeAtRootDomainMapBuilder;
   friend std::string toString(const ComputeAtRootDomainMap&);
 
  public:
   //! Builds a mapping table by analyzing the current
   //! fusion. Overwrite a previous table if any.
-  void build();
+  //!
+  //! \param map_through_reduction If set
+  //!   true, will disable UnmappableReductionDomains check.
+  //!   This is only for re-using logic in detecting
+  //!   normalization fusions, which deviates slightly from
+  //!   intended use of this class. Should always be true
+  //!   in compute_at use cases.
+  void build(bool map_through_reduction = false);
 
   //! Returns if key(td_a, id_a) and key(td_b, id_b) are mapped to eachother
   //! (equivalent), or are the same key.
@@ -251,6 +258,11 @@ class TORCH_CUDA_API ComputeAtRootDomainMap : public RootDomainMap {
       const std::vector<IterDomain*>& from_root,
       const TensorDomain* to_td,
       const std::vector<IterDomain*>& to_root) const;
+
+  std::unordered_set<IterDomain*> getMappableDims(
+      const TensorDomain* producer,
+      const TensorDomain* consumer,
+      bool producer_to_consumer) const;
 
  private:
   //! Returns if key_a and key(td_b, id_b) are mapped to eachother (equivalent),
@@ -312,9 +324,12 @@ std::string toString(const ComputeAtRootDomainMap& root_map);
 //! current fusion entirely. IterDomains that can be mapped each
 //! other with computeAt are grouped into the same subset in the
 //! DisjointSet.
-class TORCH_CUDA_API ComputeAtRootDomainMapBuilder : private BackwardVisitor {
+class TORCH_CUDA_CU_API ComputeAtRootDomainMapBuilder
+    : private BackwardVisitor {
  public:
-  ComputeAtRootDomainMapBuilder(ComputeAtRootDomainMap& root_map);
+  explicit ComputeAtRootDomainMapBuilder(
+      ComputeAtRootDomainMap& root_map,
+      bool map_through_reduction = false);
 
  private:
   //! Set a pair of producer-consumer domain keys as mappable
@@ -356,6 +371,10 @@ class TORCH_CUDA_API ComputeAtRootDomainMapBuilder : private BackwardVisitor {
     mapPointwiseOrReductionOp(op);
   }
 
+  void handle(WelfordOp* wop) override {
+    mapPointwiseOrReductionOp(wop);
+  }
+
   void handle(BroadcastOp* op) override;
 
   void handle(TransposeOp* op) override;
@@ -378,6 +397,10 @@ class TORCH_CUDA_API ComputeAtRootDomainMapBuilder : private BackwardVisitor {
   DomainKeyMap<DomainKeySet> pending_map_;
   std::unordered_set<Expr*> visited_;
   UnmappableReductionDomains incompatible_domains_;
+
+  //! Disable UnmappableReductions check, should
+  //!  always be false for compute_at use cases
+  bool map_through_reduction_ = false;
 };
 
 } // namespace cuda

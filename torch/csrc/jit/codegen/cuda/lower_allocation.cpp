@@ -47,7 +47,7 @@ class AllocationInserter : public kir::MutableIrVisitor {
     size_t fl_idx_next = 0;
 
     for (auto fl : for_loops) {
-      if (alloc_pos == fuser_tv->getThisComputeAtAxis()) {
+      if (alloc_pos == fuser_tv->getComputeAtPosition()) {
         break;
       }
 
@@ -131,14 +131,11 @@ class AllocationInserter : public kir::MutableIrVisitor {
         std::stringstream ss;
         ss << id->parallelType();
         new_loop = ir_builder.create<kir::ForLoop>(
-            ir_builder.create<kir::NamedScalar>(ss.str(), DataType::Int),
-            id,
-            nullptr);
+            ir_builder.create<kir::NamedScalar>(ss.str(), DataType::Int), id);
       } else {
         new_loop = ir_builder.create<kir::ForLoop>(
-            ir_builder.create<kir::Int>(c10::nullopt), id, nullptr);
+            ir_builder.create<kir::Int>(c10::nullopt), id);
       }
-      init_expr->setParentScope(new_loop);
       new_loop->body().push_back(init_expr);
       init_expr = new_loop;
     }
@@ -239,6 +236,21 @@ class AllocationInserter : public kir::MutableIrVisitor {
       kir::Val* init = nullptr;
       if (expr->isA<kir::ReductionOp>() && out_tv->fuserTv()->hasReduction()) {
         init = expr->as<kir::ReductionOp>()->init();
+      } else if (expr->isA<kir::WelfordOp>()) {
+        const auto welford = expr->as<kir::WelfordOp>();
+        if (out->id() == welford->outVar()->id()) {
+          init = welford->initVar() == nullptr
+              ? ir_builder.create<kir::Double>(0)
+              : welford->initVar();
+        } else if (out->id() == welford->outAvg()->id()) {
+          init = welford->initAvg() == nullptr
+              ? ir_builder.create<kir::Double>(0)
+              : welford->initAvg();
+        } else {
+          TORCH_INTERNAL_ASSERT(
+              out->id() == welford->outN()->id(), "Unreachable");
+          init = welford->initN();
+        }
       }
 
       const bool is_output = std::find(
@@ -345,7 +357,6 @@ class AllocationInserter : public kir::MutableIrVisitor {
       } else {
         alloc.for_loop->body().insert_before(
             alloc.place_before, alloc.init_expr);
-        alloc.init_expr->setParentScope(alloc.for_loop);
       }
     }
   }

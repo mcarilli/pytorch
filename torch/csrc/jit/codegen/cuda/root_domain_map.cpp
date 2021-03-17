@@ -1,3 +1,4 @@
+#include <torch/csrc/jit/codegen/cuda/ir_iostream.h>
 #include <torch/csrc/jit/codegen/cuda/ir_utils.h>
 #include <torch/csrc/jit/codegen/cuda/iter_visitor.h>
 #include <torch/csrc/jit/codegen/cuda/root_domain_map.h>
@@ -197,7 +198,7 @@ void UnmappableReductionDomains::handle(ReductionOp* op) {
   // Builds a map from reduction domains to consumer domains.
   TensorView* out_tv = op->out()->as<TensorView>();
   std::vector<DomainKey> reduction_keys;
-  for (const auto id : out_tv->getMaybeRFactorDomain()) {
+  for (const auto id : out_tv->getRootDomain()) {
     if (id->isReduction()) {
       DomainKey key(out_tv->domain(), id);
       reduction_keys.push_back(key);
@@ -263,12 +264,12 @@ bool UnmappableReductionDomains::isReductionOutputMapped(
   return false;
 }
 
-void ComputeAtRootDomainMap::build() {
+void ComputeAtRootDomainMap::build(bool map_through_reduction) {
   // Make sure we start from scratch. Throw away previous results.
   eq_set_.clear();
   bcast_map_.clear();
   new_broadcast_domains_.clear();
-  ComputeAtRootDomainMapBuilder builder(*this);
+  ComputeAtRootDomainMapBuilder builder(*this, map_through_reduction);
 }
 
 bool ComputeAtRootDomainMap::canMap(
@@ -285,16 +286,44 @@ bool ComputeAtRootDomainMap::canMap(
       "Non-root domain is not supproted: ",
       id_b);
 
-  if (id_a->isBroadcast()) {
-    for (const auto& key_a : getConcretizedKeys(td_a, id_a)) {
-      if (!canMap(key_a, td_b, id_b)) {
+  // Forward to overloaded functions
+  if (!id_a->isBroadcast() && !id_b->isBroadcast()) {
+    return canMap(DomainKey(td_a, id_a), DomainKey(td_b, id_b));
+  } else if (!id_a->isBroadcast()) {
+    return canMap(DomainKey(td_a, id_a), td_b, id_b);
+  } else if (!id_b->isBroadcast()) {
+    return canMap(DomainKey(td_b, id_b), td_a, id_a);
+  }
+
+  // At this point, both are broadcast. Every pair of concrete IDs of
+  // both id_a and id_b needs to be looked at. Whether they are
+  // mappable depends on whether the concrete IDs are broadcast or
+  // not. Note that a broadcast axis is used a concrete ID when it is
+  // part of an output tensor domain, i.e., when it never gets
+  // concretized with any non-broadcast axis.
+
+  // If there exists a pair of non-broadcast concrete IDs is not
+  // mappable, id_a and id_b can't be mapped together. Otherwise, they
+  // can be mapped when there is any mappable pair is found.
+  bool mappable_pair_found = false;
+  for (const auto& key_a : getConcretizedKeys(td_a, id_a)) {
+    for (const auto& key_b : getConcretizedKeys(td_b, id_b)) {
+      const bool mappable = canMap(key_a, key_b);
+      mappable_pair_found = mappable_pair_found || mappable;
+      // If both concrete IDs are not broadcast, they must be
+      // mappable. Also, if either of the concrete IDs is a reduction,
+      // that means a trivial reduction (i.e., broadcast immediately
+      // followed by reduction), which does not prevent any mapping.
+      if (!key_a.concreteId()->isBroadcast() &&
+          !key_b.concreteId()->isBroadcast() &&
+          !key_a.concreteId()->isReduction() &&
+          !key_b.concreteId()->isReduction() && !mappable) {
         return false;
       }
     }
-    return true;
-  } else {
-    return canMap(DomainKey(td_a, id_a), td_b, id_b);
   }
+
+  return mappable_pair_found;
 }
 
 bool ComputeAtRootDomainMap::canMap(
@@ -306,16 +335,40 @@ bool ComputeAtRootDomainMap::canMap(
       "Non-root domain is not supproted: ",
       id_b);
 
-  if (id_b->isBroadcast()) {
-    for (const auto& key_b_bc : getConcretizedKeys(td_b, id_b)) {
-      if (!canMap(key_a, key_b_bc)) {
-        return false;
-      }
-    }
-    return true;
-  } else {
+  if (!id_b->isBroadcast()) {
     return canMap(key_a, DomainKey(td_b, id_b));
   }
+
+  // If id_b is broadcast, look at all the concrete IDs that id_b may
+  // be concretized to. Whether it is mappable with key_a depends on
+  // whether key_a's concrete ID is also broadcast.
+  // 1) key_a's concrete ID is also broadcast: They are mappable when
+  // there is any mappable concrete ID exists in the concrete ID set
+  // of id_b.
+  // 2) key_a's concrete ID is not broadcast: Since key_a is indeed
+  // concrete, it must be mappable with any of concrete ID of id_b,
+  // except when a id_b concrete is broadcast.
+  const bool key_a_bcast =
+      key_a.concreteId() && key_a.concreteId()->isBroadcast();
+  const bool key_a_reduction =
+      (key_a.concreteId() && key_a.concreteId()->isReduction()) ||
+      key_a.id()->isReduction();
+  bool mappable_pair_found = false;
+  for (const auto& key_b : getConcretizedKeys(td_b, id_b)) {
+    const bool mappable = canMap(key_a, key_b);
+    mappable_pair_found = mappable_pair_found || mappable;
+    // If both concrete IDs are not broadcast, they must be mappable.
+    // However, if key_b's concrete ID is a reduction, the concrete ID
+    // is a result of a trivial reduction, so it should not prevent
+    // any other mapping. Similarly, if key_a is a reduction, it just
+    // needs to find any concrete ID of key_b that can be mapped.
+    if (!key_a_bcast && !key_b.concreteId()->isBroadcast() &&
+        !key_b.concreteId()->isReduction() && !key_a_reduction && !mappable) {
+      return false;
+    }
+  }
+
+  return mappable_pair_found;
 }
 
 bool ComputeAtRootDomainMap::canMap(
@@ -441,9 +494,36 @@ std::unordered_map<IterDomain*, IterDomain*> ComputeAtRootDomainMap::map(
         " Producer root: ",
         producer_root,
         ". Consumer root: ",
-        consumer_root);
+        consumer_root,
+        ". Mapping: ",
+        toString(*this));
   }
   return id_map;
+}
+
+std::unordered_set<IterDomain*> ComputeAtRootDomainMap::getMappableDims(
+    const TensorDomain* producer,
+    const TensorDomain* consumer,
+    bool producer_to_consumer) const {
+  const auto& producer_root = producer->getMaybeRFactorDomain();
+  const auto& consumer_root = consumer->getRootDomain();
+  const TensorDomain* from_td = producer_to_consumer ? producer : consumer;
+  const TensorDomain* to_td = producer_to_consumer ? consumer : producer;
+  const auto& from_ids = producer_to_consumer ? producer_root : consumer_root;
+  const auto& to_ids = producer_to_consumer ? consumer_root : producer_root;
+
+  std::unordered_map<IterDomain*, IterDomain*> id_map =
+      mapBestEffort(from_td, from_ids, to_td, to_ids);
+
+  std::unordered_set<IterDomain*> mappable_ids;
+
+  for (auto& from_id : from_ids) {
+    if (id_map.find(from_id) != id_map.end()) {
+      mappable_ids.emplace(from_id);
+      mappable_ids.emplace(id_map.at(from_id));
+    }
+  }
+  return mappable_ids;
 }
 
 std::string toString(const ComputeAtRootDomainMap& root_map) {
@@ -453,8 +533,9 @@ std::string toString(const ComputeAtRootDomainMap& root_map) {
 }
 
 ComputeAtRootDomainMapBuilder::ComputeAtRootDomainMapBuilder(
-    ComputeAtRootDomainMap& root_map)
-    : root_map_(root_map) {
+    ComputeAtRootDomainMap& root_map,
+    bool map_through_reduction)
+    : root_map_(root_map), map_through_reduction_(map_through_reduction) {
   Fusion* fusion = FusionGuard::getCurFusion();
   TORCH_INTERNAL_ASSERT(fusion != nullptr);
   // Set concrete domains for broadcast domains that never get joined
@@ -561,7 +642,7 @@ void ComputeAtRootDomainMapBuilder::mapPointwiseOrReductionOp(Expr* e) {
   // Broadcast is handled separately, so e should never be BroadcastOp.
   TORCH_INTERNAL_ASSERT(e->getExprType() != ExprType::BroadcastOp);
 
-  TORCH_INTERNAL_ASSERT(e->outputs().size() == 1);
+  TORCH_INTERNAL_ASSERT(e->outputs().size() >= 1);
   const TensorView* out_tv = e->output(0)->as<TensorView>();
   const TensorDomain* out_td = out_tv->domain();
   const auto& out_root = out_td->getRootDomain();
@@ -574,7 +655,18 @@ void ComputeAtRootDomainMapBuilder::mapPointwiseOrReductionOp(Expr* e) {
         TensorDomain::noReductions(i->getMaybeRFactorDomain());
     TORCH_INTERNAL_ASSERT(in_root.size() == out_root.size());
     for (size_t it = 0; it < in_root.size(); it++) {
-      setMaybeMapped(in_td, in_root[it], out_td, out_root[it]);
+      if (e->outputs().size() > 1) {
+        TORCH_INTERNAL_ASSERT(
+            e->isA<WelfordOp>(), "Only supported multioutput op is welford");
+        for (auto o : e->outputs()) {
+          auto o_tv = o->as<TensorView>();
+          auto o_td = o_tv->domain();
+          auto o_root = o_td->getRootDomain();
+          setMaybeMapped(in_td, in_root[it], o_td, o_root[it]);
+        }
+      } else {
+        setMaybeMapped(in_td, in_root[it], out_td, out_root[it]);
+      }
     }
   }
 }
@@ -728,7 +820,8 @@ bool ComputeAtRootDomainMapBuilder::safeToMap(const DomainKeySet& domains) {
   // if (incompatible_domains_.isReductionOutputMapped(unique_domains,
   // eq_set_)) {
   if (incompatible_domains_.isReductionOutputMapped(
-          unique_domains, root_map_)) {
+          unique_domains, root_map_) &&
+      !map_through_reduction_) {
     return false;
   }
   return true;

@@ -11,6 +11,9 @@ __inline__ __device__ void welfordCombine(
     const T& b_M2,
     const T& b_avg,
     TN b_N) {
+  if (b_N == 0) {
+    return;
+  }
   TN ab_N = a_N + b_N;
   T delta = b_avg - a_avg;
   a_avg += delta * b_N / ab_N;
@@ -100,7 +103,9 @@ __inline__ __device__ void blockWelford(
     }
   }
   __syncthreads();
-  for (int factor = np2 / 2; factor > 0; factor >>= 1) {
+
+  // loop peel the final iteration to save one syncthread for the end
+  for (int factor = np2 / 2; factor > 1; factor >>= 1) {
     if (reduction_tid < factor) {
       welfordCombine(
           shared_mem_M2[linear_tid],
@@ -113,10 +118,30 @@ __inline__ __device__ void blockWelford(
     __syncthreads();
   }
   if (should_write && read_write_pred) {
-    out_M2 = shared_mem_M2[linear_tid];
-    out_avg = shared_mem_avg[linear_tid];
-    out_N = shared_mem_N[linear_tid];
+    T res_M2 = out_M2;
+    T res_avg = out_avg;
+    TN res_N = out_N;
+    welfordCombine(
+        res_M2,
+        res_avg,
+        res_N,
+        shared_mem_M2[linear_tid],
+        shared_mem_avg[linear_tid],
+        shared_mem_N[linear_tid]);
+    if (reduction_size > 1) {
+      welfordCombine(
+          res_M2,
+          res_avg,
+          res_N,
+          shared_mem_M2[linear_tid + reduction_stride],
+          shared_mem_avg[linear_tid + reduction_stride],
+          shared_mem_N[linear_tid + reduction_stride]);
+    }
+    out_M2 = res_M2;
+    out_avg = res_avg;
+    out_N = res_N;
   }
+  __syncthreads();
 }
 // -----------------------------------------------------------------------------------------------
 //  Grid Welford Prototype
@@ -275,10 +300,13 @@ __device__ void gridWelfordLastBlock(
   if (rem_size > 1) {
     const int rblock_offset = tid % rblock_size;
     const int rblock_idx = tid / rblock_size;
+    T inp_M2_tmp = init_val;
+    T inp_avg_tmp = init_val;
+    TN inp_N_tmp = 0;
     blockWelford<false, true, false>(
-        inp_M2,
-        inp_avg,
-        inp_N,
+        inp_M2_tmp,
+        inp_avg_tmp,
+        inp_N_tmp,
         inp_M2,
         inp_avg,
         inp_N,
@@ -291,9 +319,9 @@ __device__ void gridWelfordLastBlock(
         init_val);
     __syncthreads();
     if (tid < rblock_size) {
-      shared_buf_M2[tid] = inp_M2;
-      shared_buf_avg[tid] = inp_avg;
-      shared_buf_N[tid] = inp_N;
+      shared_buf_M2[tid] = inp_M2_tmp;
+      shared_buf_avg[tid] = inp_avg_tmp;
+      shared_buf_N[tid] = inp_N_tmp;
     }
     __syncthreads();
     if (should_write) {
@@ -307,9 +335,7 @@ __device__ void gridWelfordLastBlock(
   }
 
   if (should_write && read_write_pred) {
-    out_M2 = inp_M2;
-    out_avg = inp_avg;
-    out_N = inp_N;
+    welfordCombine(out_M2, out_avg, out_N, inp_M2, inp_avg, inp_N);
   }
 }
 
@@ -352,11 +378,10 @@ __device__ bool gridWelford(
   const auto rblock_size =
       size_of_reduction_block<X_THREAD, Y_THREAD, Z_THREAD>(blockDim);
 
-  // advance to the offset for this segment
-  // index of reduction * size of the reduction * size of threads
-  shared_buf_M2 += seg_idx * seg_size * rblock_size;
-  shared_buf_avg += seg_idx * seg_size * rblock_size;
-  shared_buf_N += seg_idx * seg_size * rblock_size;
+  work_buf_M2 += seg_idx * seg_size * rblock_size;
+  work_buf_avg += seg_idx * seg_size * rblock_size;
+  work_buf_N += seg_idx * seg_size * rblock_size;
+
   if ((X_THREAD || threadIdx.x == 0) && (Y_THREAD || threadIdx.y == 0) &&
       (Z_THREAD || threadIdx.z == 0)) {
     auto rblock_offset = offset_in_reduction_segment<X_BLOCK, Y_BLOCK, Z_BLOCK>(

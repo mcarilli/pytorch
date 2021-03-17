@@ -52,6 +52,28 @@ static inline Tensor to_impl(const Tensor& self, const TensorOptions& options, b
   return r;
 }
 
+// If input tensor is fp32, cast it to fp16, otherwise leave it alone.
+// (this is intended to be used internally by the JIT autocast implementation)
+Tensor autocast_to_fp16(const Tensor& self) {
+  if (self.dtype() == at::ScalarType::Float) {
+    return to_impl(
+        self, self.options().dtype(at::ScalarType::Half), false, false);
+  } else {
+    return self;
+  }
+}
+
+// If input tensor is fp16, cast it to fp32, otherwise leave it alone.
+// (this is intended to be used internally by the JIT autocast implementation)
+Tensor autocast_to_fp32(const Tensor& self) {
+  if (self.dtype() == at::ScalarType::Half) {
+    return to_impl(
+        self, self.options().dtype(at::ScalarType::Float), false, false);
+  } else {
+    return self;
+  }
+}
+
 Tensor to(
   const Tensor& self,
   const TensorOptions& options_,
