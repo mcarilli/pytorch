@@ -106,8 +106,10 @@ class CudaKernelGenerator : private kir::IrVisitor {
     // Random number generator (optional)
     if (kernel_summary.is_stochastic) {
       indent() << "const int idx = blockIdx.x*blockDim.x + threadIdx.x;\n";
-      indent() << "auto seeds = at::cuda::philox::unpack(philox_args)\n";
-      indent() << "Philox rnd(std::get<0>(seeds), idx, std::get<1>(seeds));\n";
+      indent() << "auto offset = philox_args.captured_ ?\n";
+      indent() << "  static_cast<uint64_t>(*(philox_args.offset_.ptr) + philox_args.offset_intragraph_) :\n";
+      indent() << "  philox_args.offset_.val;\n";
+      indent() << "Philox rnd(philox_args.seed_, idx, offset);\n";
     }
 
     // Do we have any dynamic shared memory buffers?
