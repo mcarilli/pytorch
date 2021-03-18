@@ -1982,13 +1982,17 @@ class TestCudaFuser(JitTestCase):
         a = torch.randn((size,), device="cuda", dtype=torch.float)
 
         def t(x):
-            o = x
-            for _ in range(2):
-                o = o + 1.0
-                o = torch.nn.functional.dropout(o, p=0.1)
+            o = x + 1.0
+            o = torch.nn.functional.dropout(o, p=0.1)
+            o = o + 1.0
+            o = torch.nn.functional.dropout(o, p=0.1)
             return o
 
         t_jit = torch.jit.script(t)
+
+        # Warmup, allows profiling and fusion?
+        for _ in range(5):
+            t_jit(a)
 
         torch.cuda.nvtx.range_push("desoto")
         # Control (jitted, but not graphed)
@@ -2013,7 +2017,7 @@ class TestCudaFuser(JitTestCase):
         # Runs a jitted + graphed -> just jitted -> jitted + graphed sequence.
         # The ops in the overall sequence should be the same as Control.
         g.replay()
-        # graph_out is now filled with the graph's results. Use it as eager input
+        # graph_out is now filled with the graph's results. Use it as ungraphed input.
         out = t_jit(graph_out)
         graph_in.copy_(out)
         g.replay()
