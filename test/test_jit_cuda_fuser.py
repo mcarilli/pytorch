@@ -1995,13 +1995,11 @@ class TestCudaFuser(JitTestCase):
 
         self.assertGraphContainsExactly(t_jit.graph_for(a), FUSION_GUARD, 1)
 
-        torch.cuda.nvtx.range_push("desoto")
         # Control (jitted, ungraphed)
         torch.cuda.manual_seed(5)
         eager_out = a.clone()
         for _ in range(3):
             eager_out = t_jit(eager_out)
-        torch.cuda.nvtx.range_pop()
 
         graph_in = a.clone()
         g = torch.cuda._Graph()
@@ -2022,7 +2020,6 @@ class TestCudaFuser(JitTestCase):
         out = t_jit(graph_out)
         graph_in.copy_(out)
         g.replay()
-        torch.cuda.nvtx.range_pop()
 
         # If replay() updated RNG state correctly, graph_out should now equal eager_out
         self.assertEqual(graph_out, eager_out)
