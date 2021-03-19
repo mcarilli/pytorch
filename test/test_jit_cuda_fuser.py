@@ -1978,7 +1978,6 @@ class TestCudaFuser(JitTestCase):
     @unittest.skipIf(GRAPH_EXECUTOR != ProfilingMode.PROFILING,
                      "Requires fusion optimization pass to be effective")
     def test_graph_rng(self):
-        old_guard = torch._C._jit_set_nvfuser_guard_mode(True)
         self.assertTrue(torch._C._jit_nvfuser_enabled())
         size = 10000
         a = torch.randn((size,), device="cuda", dtype=torch.float)
@@ -1996,10 +1995,11 @@ class TestCudaFuser(JitTestCase):
         for _ in range(3):
             t_jit(a)
 
-        print(t_jit.graph_for(a))
+        # print(t_jit.graph_for(a))
+        self.assertGraphContainsExactly(t_jit.graph_for(x), FUSION_GUARD, 1)
 
         # torch.cuda.nvtx.range_push("desoto")
-        # # Control (jitted, but not graphed)
+        # # Control (jitted, ungraphed)
         # torch.cuda.manual_seed(5)
         # eager_out = a.clone()
         # for _ in range(3):
@@ -2016,12 +2016,12 @@ class TestCudaFuser(JitTestCase):
         #     graph_out = t_jit(graph_in)
         #     g.capture_end()
         # torch.cuda.current_stream().wait_stream(s)
+        # # g is now a jitted, graphed version of t.
 
-        # torch.cuda.nvtx.range_push("blue")
-        # # Runs a jitted + graphed -> just jitted -> jitted + graphed sequence.
+        # # Runs a (jitted, graphed) -> (jitted, ungraphed) -> (jitted, graphed) sequence.
         # # The ops in the overall sequence should be the same as Control.
         # g.replay()
-        # # graph_out is now filled with the graph's results. Use it as ungraphed input.
+        # # graph_out is now filled with g's result. Use it as ungraphed input.
         # out = t_jit(graph_out)
         # graph_in.copy_(out)
         # g.replay()
@@ -2029,7 +2029,6 @@ class TestCudaFuser(JitTestCase):
 
         # # If replay() updated RNG state correctly, graph_out should now equal eager_out
         # self.assertEqual(graph_out, eager_out)
-        torch._C._jit_set_nvfuser_guard_mode(old_guard)
 
 class TestPassManagerCudaFuser(JitTestCase):
 
