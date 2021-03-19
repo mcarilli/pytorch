@@ -1974,7 +1974,6 @@ class TestCudaFuser(JitTestCase):
         jit_o = t_jit(x)
 
     @unittest.skipIf(not RUN_CUDA, "requires CUDA")
-    # Do I need this?
     @unittest.skipIf(GRAPH_EXECUTOR != ProfilingMode.PROFILING,
                      "Requires fusion optimization pass to be effective")
     def test_graph_rng(self):
@@ -1991,44 +1990,42 @@ class TestCudaFuser(JitTestCase):
 
         t_jit = torch.jit.script(t)
 
-        # Warmup, allows profiling and fusion?
         for _ in range(3):
             t_jit(a)
 
-        # print(t_jit.graph_for(a))
-        self.assertGraphContainsExactly(t_jit.graph_for(x), FUSION_GUARD, 1)
+        self.assertGraphContainsExactly(t_jit.graph_for(a), FUSION_GUARD, 1)
 
-        # torch.cuda.nvtx.range_push("desoto")
-        # # Control (jitted, ungraphed)
-        # torch.cuda.manual_seed(5)
-        # eager_out = a.clone()
-        # for _ in range(3):
-        #     eager_out = t_jit(eager_out)
-        # torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("desoto")
+        # Control (jitted, ungraphed)
+        torch.cuda.manual_seed(5)
+        eager_out = a.clone()
+        for _ in range(3):
+            eager_out = t_jit(eager_out)
+        torch.cuda.nvtx.range_pop()
 
-        # graph_in = a.clone()
-        # g = torch.cuda._Graph()
-        # s = torch.cuda.Stream()
-        # s.wait_stream(torch.cuda.current_stream())
-        # with torch.cuda.stream(s):
-        #     torch.cuda.manual_seed(5)
-        #     g.capture_begin()
-        #     graph_out = t_jit(graph_in)
-        #     g.capture_end()
-        # torch.cuda.current_stream().wait_stream(s)
-        # # g is now a jitted, graphed version of t.
+        graph_in = a.clone()
+        g = torch.cuda._Graph()
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            torch.cuda.manual_seed(5)
+            g.capture_begin()
+            graph_out = t_jit(graph_in)
+            g.capture_end()
+        torch.cuda.current_stream().wait_stream(s)
+        # g is now a jitted, graphed version of t.
 
-        # # Runs a (jitted, graphed) -> (jitted, ungraphed) -> (jitted, graphed) sequence.
-        # # The ops in the overall sequence should be the same as Control.
-        # g.replay()
-        # # graph_out is now filled with g's result. Use it as ungraphed input.
-        # out = t_jit(graph_out)
-        # graph_in.copy_(out)
-        # g.replay()
-        # torch.cuda.nvtx.range_pop()
+        # Runs a (jitted, graphed) -> (jitted, ungraphed) -> (jitted, graphed) sequence.
+        # The ops in the overall sequence should be the same as Control.
+        g.replay()
+        # graph_out is now filled with g's result. Use it as ungraphed input.
+        out = t_jit(graph_out)
+        graph_in.copy_(out)
+        g.replay()
+        torch.cuda.nvtx.range_pop()
 
-        # # If replay() updated RNG state correctly, graph_out should now equal eager_out
-        # self.assertEqual(graph_out, eager_out)
+        # If replay() updated RNG state correctly, graph_out should now equal eager_out
+        self.assertEqual(graph_out, eager_out)
 
 class TestPassManagerCudaFuser(JitTestCase):
 
