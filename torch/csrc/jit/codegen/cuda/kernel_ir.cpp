@@ -97,14 +97,12 @@ IterDomain::IterDomain(
   setName(iter_domain->name());
 }
 
+//! Note that the parallel dimension, if available, may be different
+//! from the actual extent of this IterDomain as the parallel
+//! dimension is determined by the largest extent of IterDomains
+//! sharing the same loop.
 Val* IterDomain::extent() const {
   TORCH_INTERNAL_ASSERT(extent_ != nullptr);
-  if (isThread()) {
-    if (extent_->isScalar() && extent_->isConst()) {
-      return extent_;
-    }
-    return NamedScalar::getParallelDim(parallelType());
-  }
   return extent_;
 }
 
@@ -363,6 +361,16 @@ TensorIndex::TensorIndex(
           indices.end(),
           [](Val* v) { return v->dtype() == DataType::Int; }),
       "Cannot index with a value other than an int.");
+  indices_.erase(
+      std::remove_if(
+          indices_.begin(),
+          indices_.end(),
+          [](Val* index) { return index->isZeroInt(); }),
+      indices_.end());
+  // If indices becomes empty, just put one ZeroInt
+  if (indices_.empty()) {
+    indices_.push_back(kir::IrBuilder(GpuLower::current()->kernel()).zero());
+  }
 }
 
 Sync::Sync(Passkey passkey, bool war_sync)

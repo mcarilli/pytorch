@@ -392,7 +392,7 @@ std::pair<TensorDomain*, unsigned int> TransformReplay::replayCasP(
   // Figure out all inputs required to generate the compute_at dimensions. We
   // need all deps because inputs on producer may be in getRootDomain, but we
   // may need in rFactorDomain
-  std::unordered_set<Val*> all_CA_id_deps = DependencyCheck::getAllValsBetween(
+  auto all_CA_id_deps = DependencyCheck::getAllValsBetween(
       {producer_root.begin(), producer_root.end()},
       {producer_CA_ids.begin(), producer_CA_ids.end()});
 

@@ -3055,6 +3055,139 @@ TEST(NVFuserTest, FusionRootMappingReductionDependency4_CUDA) {
       {true, false});
 }
 
+// Reproducer of issue #749
+TEST(NVFuserTest, FusionRootMappingReductionDependency5_CUDA_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeSymbolicTensor(2);
+  fusion.addInput(tv0);
+  auto tv1 = add(tv0, new Double(1));
+  auto tv2 = sum(tv1, {1});
+  auto tv3 = broadcast(tv2, {false, true});
+  auto tv4 = add(tv0, tv3);
+  auto tv5 = add(tv4, tv1);
+  fusion.addOutput(tv5);
+
+  checkIdMapped(
+      tv0,
+      tv0->getRootDomain(),
+      {true, false},
+      tv1,
+      tv1->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv1,
+      tv1->getRootDomain(),
+      {true, false},
+      tv2,
+      tv2->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv2,
+      tv2->getRootDomain(),
+      {true, false},
+      tv3,
+      tv3->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv3,
+      tv3->getRootDomain(),
+      {true, true},
+      tv4,
+      tv4->getRootDomain(),
+      {true, true});
+  checkIdMapped(
+      tv0,
+      tv0->getRootDomain(),
+      {true, false},
+      tv4,
+      tv4->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv4,
+      tv4->getRootDomain(),
+      {true, true},
+      tv5,
+      tv5->getRootDomain(),
+      {true, true});
+}
+
+// Similar to RootMappingReductionDependency5 but with rFactor
+TEST(NVFuserTest, FusionRootMappingReductionDependency6_CUDA_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeSymbolicTensor(2);
+  fusion.addInput(tv0);
+  auto tv1 = add(tv0, new Double(1));
+  auto tv2 = sum(tv1, {1});
+  auto tv3 = broadcast(tv2, {false, true});
+  auto tv4 = add(tv0, tv3);
+  auto tv5 = add(tv4, tv1);
+  fusion.addOutput(tv5);
+
+  tv2->split(1, 4);
+  auto tv6 = tv2->rFactor({-1});
+
+  checkIdMapped(
+      tv0,
+      tv0->getRootDomain(),
+      {true, false},
+      tv1,
+      tv1->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv1,
+      tv1->getRootDomain(),
+      {true, false},
+      tv6,
+      tv6->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv6,
+      tv6->getMaybeRFactorDomain(),
+      {true, true, false},
+      tv2,
+      tv2->getRootDomain(),
+      {true, true});
+  checkIdMapped(
+      tv1,
+      tv1->getRootDomain(),
+      {true, false},
+      tv2,
+      tv2->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv2,
+      tv2->getRootDomain(),
+      {true, false},
+      tv3,
+      tv3->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv3,
+      tv3->getRootDomain(),
+      {true, true},
+      tv4,
+      tv4->getRootDomain(),
+      {true, true});
+  checkIdMapped(
+      tv0,
+      tv0->getRootDomain(),
+      {true, false},
+      tv4,
+      tv4->getRootDomain(),
+      {true, false});
+  checkIdMapped(
+      tv4,
+      tv4->getRootDomain(),
+      {true, true},
+      tv5,
+      tv5->getRootDomain(),
+      {true, true});
+}
+
 TEST(NVFuserTest, FusionRootMappingMultipleBroadcast_CUDA) {
   Fusion fusion;
   FusionGuard fg(&fusion);
@@ -10385,7 +10518,7 @@ TEST(NVFuserTest, FusionBiasGeluBwd_CUDA) {
   fusion.addOutput(t27);
 
   auto options = at::TensorOptions().dtype(at::kHalf).device(at::kCUDA, 0);
-  at::manual_seed(0);
+  at::manual_seed(1);
   c10::IntArrayRef input_shape{6, 512, 4096};
   c10::IntArrayRef bias_shape{4096};
   auto at_input = at::randn(input_shape, options);
@@ -13740,6 +13873,144 @@ TEST(NVFuserTest, FusionReductionPredicate_CUDA) {
 
   testValidate(
       &fusion, {cg_output}, {input}, {aten_output}, __LINE__, __FILE__);
+}
+
+TEST(NVFuserTest, FusionIssue728_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeSymbolicTensor(1);
+  fusion.addOutput(tv0);
+  auto tv1 = makeSymbolicTensor(1);
+  fusion.addOutput(tv1);
+  auto tv2 = makeSymbolicTensor(1);
+  fusion.addOutput(tv2);
+
+  auto tv3 = add(tv0, new Double(1));
+  auto tv4 = add(tv3, tv1);
+  auto tv5 = add(tv4, new Double(1));
+  auto tv6 = add(tv2, new Double(1));
+  fusion.addOutput(tv5);
+  fusion.addOutput(tv6);
+
+  // tv0 -> tv3 -+
+  // tv1 --------+-> tv4 -> tv5
+  //
+  // tv2 -> tv6
+
+  auto all_vals_under_tv3 =
+      DependencyCheck::getAllValsBetween2({tv3}, fusion.outputs());
+  std::unordered_set<Val*> included_tensors({tv3, tv4, tv5});
+  for (auto tv : included_tensors) {
+    TORCH_CHECK(
+        std::find(all_vals_under_tv3.begin(), all_vals_under_tv3.end(), tv) !=
+            all_vals_under_tv3.end(),
+        "TV",
+        tv->name(),
+        " not found");
+  }
+  for (auto tv : ir_utils::filterByType<TensorView>(fusion.vals())) {
+    if (included_tensors.find(tv) == included_tensors.end()) {
+      TORCH_CHECK(
+          std::find(all_vals_under_tv3.begin(), all_vals_under_tv3.end(), tv) ==
+              all_vals_under_tv3.end(),
+          "TV",
+          tv->name(),
+          " should not be found");
+    }
+  }
+
+  auto no_dependency =
+      DependencyCheck::getAllValsBetween2({}, fusion.outputs());
+  TORCH_CHECK(no_dependency.empty(), "No val should be returned");
+
+  auto no_dep_path = DependencyCheck::getAllValsBetween2({tv0, tv1}, {tv6});
+  TORCH_CHECK(no_dep_path.empty(), "No val should be returned");
+
+  auto no_dep_path2 = DependencyCheck::getAllValsBetween2({tv2}, {tv5});
+  TORCH_CHECK(no_dep_path2.empty(), "No val should be returned");
+
+  auto just_tv3 = DependencyCheck::getAllValsBetween2({tv3}, {tv3});
+  TORCH_CHECK(
+      just_tv3.size() == 1 && *(just_tv3.begin()) == tv3,
+      "Only tv3 should be included");
+}
+
+TEST(NVFuserTest, FusionIssue757_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeSymbolicTensor(2);
+  fusion.addInput(tv0);
+  auto tv1 = sum(tv0, {1});
+  auto tv2 = broadcast(tv1, {false, true});
+  auto tv3 = makeSymbolicTensor(2);
+  fusion.addInput(tv3);
+  auto tv4 = add(tv2, tv3);
+  fusion.addOutput(tv4);
+
+  tv1->computeAt(tv4, -1);
+
+  tv4->axis(-1)->parallelize(ParallelType::TIDx);
+  tv1->axis(-1)->parallelize(ParallelType::TIDx);
+
+  int numel_x = 650;
+  int numel_y = 102;
+
+  auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
+  at::Tensor t0 = at::randn({numel_x, numel_y}, options);
+  at::Tensor t3 = at::randn({numel_x, numel_y}, options);
+  std::vector<IValue> inputs = {t0, t3};
+
+  FusionExecutor fe;
+  fe.compileFusion(&fusion);
+  auto outputs = fe.runFusion(inputs);
+
+  auto t1 = t0.sum({1});
+  auto t2 = t1.unsqueeze(-1).expand({numel_x, numel_y});
+  auto t4 = t2 + t3;
+
+  testValidate(&fusion, outputs, inputs, {t4}, __LINE__, __FILE__);
+}
+
+// See issue #759
+TEST(NVFuserTest, FusionPredicatedBlockBroadcast_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeSymbolicTensor(2);
+  fusion.addInput(tv0);
+  auto tv1 = sum(tv0, {1});
+  auto tv2 = broadcast(tv1, {false, true});
+  auto tv3 = makeSymbolicTensor(2);
+  fusion.addInput(tv3);
+  auto tv4 = add(tv2, tv3);
+  fusion.addOutput(tv4);
+
+  tv4->split(0, 4);
+  tv1->computeAt(tv4, -1);
+
+  tv4->axis(-1)->parallelize(ParallelType::TIDx);
+  tv4->axis(1)->parallelize(ParallelType::TIDy);
+  tv1->axis(-1)->parallelize(ParallelType::TIDx);
+
+  int numel_x = 100;
+  int numel_y = 101;
+
+  auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
+  at::Tensor t0 = at::randn({numel_x, numel_y}, options);
+  at::Tensor t3 = at::randn({numel_x, numel_y}, options);
+  std::vector<IValue> inputs = {t0, t3};
+
+  FusionExecutor fe;
+  fe.compileFusion(&fusion);
+  auto outputs = fe.runFusion(inputs);
+
+  auto t1 = t0.sum({1});
+  auto t2 = t1.unsqueeze(-1).expand({numel_x, numel_y});
+  auto t4 = t2 + t3;
+
+  testValidate(&fusion, outputs, inputs, {t4}, __LINE__, __FILE__);
 }
 
 } // namespace jit
