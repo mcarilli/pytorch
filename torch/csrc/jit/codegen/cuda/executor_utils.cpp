@@ -12,6 +12,7 @@
 #include <torch/csrc/jit/codegen/fuser/cuda/fused_kernel.h>
 #include <torch/csrc/jit/resource_guard.h>
 
+#include <nvfuser_resources/PhiloxCudaStateRaw.h>
 #include <nvfuser_resources/block_reduction.h>
 #include <nvfuser_resources/broadcast.h>
 #include <nvfuser_resources/fp16_support.h>
@@ -20,7 +21,6 @@
 #include <nvfuser_resources/random_numbers.h>
 #include <nvfuser_resources/tensor.h>
 #include <nvfuser_resources/welford.h>
-#include <nvfuser_resources/PhiloxCudaStateRaw.h>
 
 #include <fstream>
 
